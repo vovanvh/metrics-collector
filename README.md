@@ -377,6 +377,34 @@ See [Adding New Metrics Guide](docs/adding-new-metrics.md) for detailed instruct
 }
 ```
 
+### Updating Configuration
+
+Configuration settings are loaded from MongoDB **once at startup**. To apply changes:
+
+**To update settings:**
+1. Update the MongoDB document:
+   ```javascript
+   db.MonitoringSettings.updateOne(
+     { "key": "1111-1111" },
+     { $set: { "metric_settings.LoadAverage.timeout": 10 } }
+   )
+   ```
+
+2. Restart the application:
+   ```bash
+   # If running manually
+   # Press Ctrl+C and restart
+
+   # If running as systemd service
+   sudo systemctl restart metrics-collector
+   ```
+
+**Important notes:**
+- **Restart required:** YES - settings are loaded only at startup
+- **Recompile required:** NO - settings are data, not code
+- The application does not hot-reload configuration changes
+- All settings changes require a restart to take effect
+
 ## Querying Data
 
 ### MongoDB Queries
