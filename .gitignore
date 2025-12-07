@@ -1,0 +1,30 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock file (optional - include for binaries, exclude for libraries)
+# Cargo.lock
+
+# IDE / Editor specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debug files
+*.log
+
+# Environment files (may contain secrets)
+.env
+.env.local
+
+# Test coverage
+*.profraw
+*.profdata
+
+# Backup files
+*.bak
+*.tmp

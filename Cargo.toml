@@ -1,0 +1,51 @@
+[package]
+name = "metrics-collector"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime for concurrent task execution
+tokio = { version = "1.35", features = ["full"] }
+
+# MongoDB driver for database operations
+mongodb = "2.8"
+
+# Serialization/deserialization framework
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# System information gathering (CPU, memory, disk)
+sysinfo = "0.30"
+
+# Docker API client for container stats
+bollard = "0.16"
+
+# Futures utilities for async stream handling
+futures-util = "0.3"
+
+# Date and time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Structured logging framework
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling utilities
+anyhow = "1.0"
+thiserror = "1.0"
+
+# BSON support for MongoDB
+bson = { version = "2.9", features = ["chrono-0_4"] }
+
+# Async trait support
+async-trait = "0.1"
+
+# CPU count detection
+num_cpus = "1.16"
+
+[profile.release]
+# Optimize for size and performance
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

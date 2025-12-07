@@ -1,0 +1,78 @@
+[Unit]
+# Service description and metadata
+Description=Metrics Collector - Server Monitoring Tool
+Documentation=https://github.com/your-org/metrics-collector
+# Start after network is available (needed for MongoDB connection)
+After=network-online.target
+Wants=network-online.target
+# Optional: start after Docker if monitoring Docker containers
+After=docker.service
+
+[Service]
+# Service type: simple means the process runs in foreground
+Type=simple
+
+# User and group to run the service as
+# SECURITY: Run as non-root user for better security
+# Create a dedicated user: sudo useradd -r -s /bin/false metrics-collector
+User=metrics-collector
+Group=metrics-collector
+
+# Working directory (where the binary is located)
+WorkingDirectory=/opt/metrics-collector
+
+# Command to execute
+# IMPORTANT: Update these values for your environment
+# --mongodb: Your MongoDB connection string
+# --key: Your unique node identifier (from MongoDB MonitoringSettings collection)
+# --database: Database name (optional, defaults to "monitoring")
+# --create-indexes: Create database indexes on startup (optional, recommended for first run)
+ExecStart=/opt/metrics-collector/metrics-collector \
+    --mongodb "mongodb://localhost:27017" \
+    --key "1111-1111" \
+    --database "monitoring"
+
+# Restart policy
+# always: Restart the service if it stops for any reason
+# on-failure: Only restart if it exits with non-zero status
+Restart=always
+RestartSec=10
+
+# Resource limits (adjust based on your requirements)
+# Limit memory usage to prevent runaway processes
+MemoryLimit=512M
+# CPU quota (100% = 1 core, 200% = 2 cores, etc.)
+CPUQuota=50%
+
+# Security hardening options
+# Prevent the service from gaining new privileges
+NoNewPrivileges=true
+# Make /home, /root, and /run/user inaccessible
+ProtectHome=true
+# Make /usr, /boot, and /efi read-only
+ProtectSystem=strict
+# Create private /tmp directory
+PrivateTmp=true
+
+# Allow write access to these directories
+# Add paths where the service needs write access (if any)
+# For Docker stats, the service needs access to Docker socket
+ReadWritePaths=/var/run/docker.sock
+
+# Logging
+# Stdout/stderr are captured by systemd journal
+# View logs with: journalctl -u metrics-collector -f
+StandardOutput=journal
+StandardError=journal
+# Add syslog identifier for easier log filtering
+SyslogIdentifier=metrics-collector
+
+# Environment variables
+# Set log level (optional)
+Environment="RUST_LOG=info"
+# Prevent color output in logs (systemd handles formatting)
+Environment="NO_COLOR=1"
+
+[Install]
+# Start this service on system boot (multi-user.target = normal boot)
+WantedBy=multi-user.target
