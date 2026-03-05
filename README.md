@@ -191,8 +191,7 @@ Custom database:
 ```bash
 metrics-collector \
   --mongodb "mongodb://localhost:27017" \
-  --key "server-01" \
-  --database "prod_monitoring"
+  --key "server-01"got an errorprod_monitoring"
 ```
 
 With index creation:

@@ -43,7 +43,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 
 # Clone or copy the project to your server
-cd /path/to/rust-project
+cd /path/to/metrics-collector
 
 # Build in release mode (optimized binary)
 cargo build --release
@@ -55,7 +55,7 @@ cargo build --release
 
 ```bash
 # On your development machine
-cd /path/to/rust-project
+cd /path/to/metrics-collector
 
 # Build for Linux (if you're on macOS/Windows)
 # First, add the target
@@ -233,6 +233,9 @@ sudo -u metrics-collector /opt/metrics-collector/metrics-collector \
 ### 1. Copy Service File
 
 ```bash
+# Navigate to the project directory (if not already there)
+cd /path/to/metrics-collector
+
 # Copy the systemd service file
 sudo cp metrics-collector.service /etc/systemd/system/
 
