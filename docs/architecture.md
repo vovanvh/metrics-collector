@@ -387,12 +387,12 @@ pub fn create_all_collectors() -> Vec<Box<dyn MetricCollector>> {
 **Document Structure:**
 ```json
 {
-  "node": "1111-1111",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "load_1min": 1.5,
-  "load_5min": 1.2,
-  "load_15min": 0.9,
-  "cpu_cores": 8
+  "node": "1111-1111",          // unique identifier of the monitored server
+  "timestamp": "2024-01-15T10:30:00Z", // UTC time when the metric was collected
+  "load_1min": 1.5,             // average number of processes in run queue over last 1 minute
+  "load_5min": 1.2,             // average number of processes in run queue over last 5 minutes
+  "load_15min": 0.9,            // average number of processes in run queue over last 15 minutes
+  "cpu_cores": 8                // total logical CPU cores; used to normalize load (load/cores = utilization ratio)
 }
 ```
 
@@ -405,17 +405,17 @@ pub fn create_all_collectors() -> Vec<Box<dyn MetricCollector>> {
 **Document Structure:**
 ```json
 {
-  "node": "1111-1111",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "total_mb": 16384,
-  "used_mb": 8192,
-  "available_mb": 8192,
-  "free_mb": 4096,
-  "used_percent": 50.0,
-  "swap_total_mb": 8192,
-  "swap_used_mb": 1024,
-  "swap_free_mb": 7168,
-  "swap_used_percent": 12.5
+  "node": "1111-1111",          // unique identifier of the monitored server
+  "timestamp": "2024-01-15T10:30:00Z", // UTC time when the metric was collected
+  "total_mb": 16384,            // total physical RAM installed, in megabytes
+  "used_mb": 8192,              // RAM currently used by processes and kernel, in megabytes
+  "available_mb": 8192,         // RAM available for new processes (includes reclaimable cache), in megabytes
+  "free_mb": 4096,              // RAM completely unused (not including reclaimable cache), in megabytes
+  "used_percent": 50.0,         // percentage of total RAM that is used (used_mb / total_mb * 100)
+  "swap_total_mb": 8192,        // total swap space configured, in megabytes
+  "swap_used_mb": 1024,         // swap space currently in use, in megabytes
+  "swap_free_mb": 7168,         // swap space not in use, in megabytes
+  "swap_used_percent": 12.5     // percentage of swap used (swap_used_mb / swap_total_mb * 100)
 }
 ```
 
@@ -428,16 +428,16 @@ pub fn create_all_collectors() -> Vec<Box<dyn MetricCollector>> {
 **Document Structure:**
 ```json
 {
-  "node": "1111-1111",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "disks": [
+  "node": "1111-1111",          // unique identifier of the monitored server
+  "timestamp": "2024-01-15T10:30:00Z", // UTC time when the metric was collected
+  "disks": [                    // array of all mounted filesystems found on the node
     {
-      "mount_point": "/",
-      "filesystem": "ext4",
-      "total_gb": 500.0,
-      "used_gb": 250.0,
-      "available_gb": 250.0,
-      "used_percent": 50.0
+      "mount_point": "/",       // path where this filesystem is mounted; use "/" for overall disk usage
+      "filesystem": "ext4",     // filesystem type (ext4, xfs, tmpfs, etc.)
+      "total_gb": 500.0,        // total capacity of this filesystem, in gigabytes
+      "used_gb": 250.0,         // space currently occupied by files, in gigabytes
+      "available_gb": 250.0,    // space available for writing (may differ from total-used due to reserved blocks)
+      "used_percent": 50.0      // percentage of total space used (used_gb / total_gb * 100)
     }
   ]
 }
@@ -452,20 +452,20 @@ pub fn create_all_collectors() -> Vec<Box<dyn MetricCollector>> {
 **Document Structure:**
 ```json
 {
-  "node": "1111-1111",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "containers": [
+  "node": "1111-1111",          // unique identifier of the monitored server
+  "timestamp": "2024-01-15T10:30:00Z", // UTC time when the metric was collected
+  "containers": [               // array of all running Docker containers on the node
     {
-      "id": "abc123",
-      "name": "my-app",
-      "cpu_percent": 25.5,
-      "memory_used_mb": 512.0,
-      "memory_limit_mb": 2048.0,
-      "memory_percent": 25.0,
-      "network_rx_mb": 10.5,
-      "network_tx_mb": 5.2,
-      "block_read_mb": 100.0,
-      "block_write_mb": 50.0
+      "id": "abc123",           // short Docker container ID
+      "name": "my-app",         // container name as assigned in Docker (without leading slash)
+      "cpu_percent": 25.5,      // CPU usage as a percentage of one core (can exceed 100% on multi-core)
+      "memory_used_mb": 512.0,  // RAM currently consumed by the container, in megabytes
+      "memory_limit_mb": 2048.0, // maximum RAM the container is allowed to use (from Docker resource limits)
+      "memory_percent": 25.0,   // percentage of memory limit used (memory_used_mb / memory_limit_mb * 100)
+      "network_rx_mb": 10.5,    // total data received over the network since container start, in megabytes
+      "network_tx_mb": 5.2,     // total data sent over the network since container start, in megabytes
+      "block_read_mb": 100.0,   // total data read from block devices (disk) since container start, in megabytes
+      "block_write_mb": 50.0    // total data written to block devices (disk) since container start, in megabytes
     }
   ]
 }
