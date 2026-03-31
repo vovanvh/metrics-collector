@@ -47,8 +47,8 @@ CPUQuota=50%
 # Security hardening options
 # Prevent the service from gaining new privileges
 NoNewPrivileges=true
-# Make /home, /root, and /run/user inaccessible
-ProtectHome=true
+# Make /home, /root, and /run/user read-only (not writable, but readable)
+ProtectHome=read-only
 # Make /usr, /boot, and /efi read-only
 ProtectSystem=strict
 # Create private /tmp directory
