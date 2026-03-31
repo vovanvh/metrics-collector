@@ -12,6 +12,10 @@ pub mod load_average;
 pub mod memory;
 pub mod disk;
 pub mod docker;
+pub mod processes;
+pub mod docker_events;
+pub mod docker_logs;
+pub mod system_events;
 
 /// Core trait that all metric collectors must implement.
 ///
@@ -82,5 +86,17 @@ pub fn create_all_collectors() -> Vec<Box<dyn MetricCollector>> {
 
         // Docker container stats (CPU, memory, network I/O per container)
         Box::new(docker::DockerCollector::new()),
+
+        // Top 20 host processes by CPU (non-Docker, kernel, system services)
+        Box::new(processes::ProcessSnapshotCollector::new()),
+
+        // Docker lifecycle events (start, stop, die, OOM-kill, restart)
+        Box::new(docker_events::DockerEventsCollector::new()),
+
+        // stdout/stderr from all running containers (batched per interval)
+        Box::new(docker_logs::DockerLogsCollector::new()),
+
+        // Kernel and systemd error events via journalctl (Linux only)
+        Box::new(system_events::SystemEventsCollector::new()),
     ]
 }
