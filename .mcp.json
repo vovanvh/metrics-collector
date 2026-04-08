@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "youtrack": {
+      "type": "http",
+      "url": "https://krysbot.youtrack.cloud/mcp",
+      "headers": {
+        "Authorization": "Bearer perm-YWRtaW4=.NTAtMg==.ATUlEHEY8rS61R2Mz6mBavw9DJHgS0"
+      }
+    }
+  }
+}

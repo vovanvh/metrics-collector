@@ -203,16 +203,15 @@ Structs are like classes in other languages:
 // From src/config.rs
 
 pub struct ConfigManager {
-    /// MongoDB client instance
     client: Client,
-
-    /// Database name
     database_name: String,
 }
 
 pub struct MonitoringSettings {
     pub key: String,
-    pub metric_settings: HashMap<String, MetricSettings>,
+    pub collect_timeout: u64,         // seconds between samples (most metrics)
+    pub collect_docker_timeout: u64,  // seconds between Docker samples
+    pub store_timeout: u64,           // window length / flush interval
 }
 ```
 
@@ -573,22 +572,28 @@ impl MetricCollector for LoadAverageCollector {
 ```rust
 // From src/scheduler.rs
 
-pub async fn run_metric_task(...) {
-    let mut interval_timer = interval(Duration::from_secs(interval_secs));
-
+async fn run_standard_task(..., mut settings: MonitoringSettings) {
     loop {
-        // .await suspends execution until the future completes
-        interval_timer.tick().await;
+        let mut collect_timer = interval(Duration::from_secs(settings.collect_timeout));
+        let flush_sleep = tokio::time::sleep(Duration::from_secs(settings.store_timeout));
+        tokio::pin!(flush_sleep);  // Sleep is !Unpin — must be pinned before use in select!
 
-        // collect() is async, so we must await it
-        match collector.collect(&node_id).await {
-            Ok(document) => {
-                // store_metric_safe is async too
-                storage.store_metric_safe(&collection_name, metric_name, document).await;
+        loop {
+            // select! awaits multiple futures simultaneously, runs the first that completes
+            select! {
+                _ = collect_timer.tick() => {
+                    match collector.collect(&node_id).await {
+                        Ok(doc)  => buffer.push(&doc),
+                        Err(e)   => error!("Collection failed: {}", e),
+                    }
+                }
+                _ = &mut flush_sleep => { break; }  // flush deadline reached
             }
-            Err(e) => {
-                error!("Collection failed: {}", e);
-            }
+        }
+
+        // Flush and store aggregated document
+        if let Some(doc) = buffer.flush(&node_id) {
+            storage.store_metric_safe(collection, metric_name, doc).await;
         }
     }
 }
@@ -599,23 +604,24 @@ pub async fn run_metric_task(...) {
 ```rust
 // From src/scheduler.rs
 
-pub async fn start(self, collectors: Vec<Box<dyn MetricCollector>>) {
+pub async fn start(self, collectors: Vec<Box<dyn MetricCollector>>, initial_settings: MonitoringSettings) {
     let mut handles = Vec::new();
 
     for collector in collectors {
-        let storage = Arc::clone(&self.storage);
-        let node_id = self.node_id.clone();
+        let storage     = Arc::clone(&self.storage);
+        let config_mgr  = Arc::clone(&self.config_manager);
+        let node_id     = self.node_id.clone();
+        let settings    = initial_settings.clone();
 
         // Spawn a new async task (runs concurrently)
         let handle = tokio::spawn(async move {
-            // This runs in parallel with other tasks
-            Self::run_metric_task(collector, storage, node_id, timeout, collection).await;
+            run_standard_task(collector, storage, config_mgr, node_id, settings).await;
         });
 
         handles.push(handle);
     }
 
-    // Wait for all tasks to complete
+    // Wait for all tasks (they run forever in normal operation)
     for handle in handles {
         handle.await.unwrap();
     }
@@ -789,7 +795,9 @@ let doc = doc! {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitoringSettings {
     pub key: String,
-    pub metric_settings: HashMap<String, MetricSettings>,
+    pub collect_timeout: u64,
+    pub collect_docker_timeout: u64,
+    pub store_timeout: u64,
 }
 ```
 

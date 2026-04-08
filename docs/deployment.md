@@ -96,8 +96,8 @@ mongosh "mongodb://your-mongodb-host:27017"
 // Switch to monitoring database
 use monitoring
 
-// The collections will be created automatically by the application
-// But you can create them manually if needed:
+// Collections are created automatically by the application
+// You can create them manually if preferred:
 db.createCollection("MonitoringSettings")
 db.createCollection("load_average_metrics")
 db.createCollection("memory_metrics")
@@ -110,52 +110,43 @@ db.createCollection("docker_metrics")
 Insert a configuration document for your server:
 
 ```javascript
-// Still in MongoDB shell
 use monitoring
 
-// Insert configuration for node "1111-1111"
 db.MonitoringSettings.insertOne({
-  "key": "1111-1111",
-  "metric_settings": {
-    "LoadAverage": {
-      "timeout": 5,
-      "collection": "load_average_metrics"
-    },
-    "Memory": {
-      "timeout": 10,
-      "collection": "memory_metrics"
-    },
-    "DiskSpace": {
-      "timeout": 30,
-      "collection": "disk_metrics"
-    },
-    "DockerStats": {
-      "timeout": 15,
-      "collection": "docker_metrics"
-    }
-  }
+  "key": "0001-0001",
+  "collect_timeout": 5,           // seconds between samples for most metrics
+  "collect_docker_timeout": 20,   // seconds between Docker samples
+  "store_timeout": 60             // seconds per aggregation window (flush interval)
 })
 
 // Verify the document was created
-db.MonitoringSettings.findOne({ "key": "1111-1111" })
+db.MonitoringSettings.findOne({ "key": "0001-0001" })
 ```
+
+**Configuration fields:**
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `key` | Unique identifier for this server/node | — |
+| `collect_timeout` | Seconds between raw samples for LoadAverage, Memory, DiskSpace | `5` |
+| `collect_docker_timeout` | Seconds between raw samples for DockerStats | `20` |
+| `store_timeout` | Length of each aggregation window in seconds | `60` |
+
+> **Live reload:** The application re-reads this document from MongoDB after every flush. Change any value and the new setting takes effect after the current window completes — no restart needed.
 
 ### 3. Create Indexes (Recommended for Production)
 
 ```javascript
-// Create indexes for better query performance
-// These make queries by node and time much faster
-
+// Create compound indexes for efficient time-series queries
 db.load_average_metrics.createIndex({ "node": 1, "timestamp": -1 })
 db.memory_metrics.createIndex({ "node": 1, "timestamp": -1 })
 db.disk_metrics.createIndex({ "node": 1, "timestamp": -1 })
 db.docker_metrics.createIndex({ "node": 1, "timestamp": -1 })
 
-// Optional: Create TTL index to auto-delete old data (e.g., after 30 days)
-// This keeps your database size manageable
+// Optional: TTL index to auto-delete old data (e.g., after 30 days)
 db.load_average_metrics.createIndex(
   { "timestamp": 1 },
-  { expireAfterSeconds: 2592000 }  // 30 days
+  { expireAfterSeconds: 2592000 }
 )
 db.memory_metrics.createIndex(
   { "timestamp": 1 },
@@ -171,13 +162,7 @@ db.docker_metrics.createIndex(
 )
 ```
 
-### Configuration Field Explanation
-
-| Field | Description | Example |
-|-------|-------------|---------|
-| `key` | Unique identifier for this server/node | `"1111-1111"`, `"server-01"` |
-| `timeout` | Collection interval in seconds | `5` = collect every 5 seconds |
-| `collection` | MongoDB collection name for storing metrics | `"load_average_metrics"` |
+Alternatively, run the application with `--create-indexes` on first start and it will create the compound `(node, timestamp)` indexes automatically.
 
 ---
 
@@ -187,9 +172,6 @@ db.docker_metrics.createIndex(
 
 ```bash
 # Create a system user for running the service
-# -r: system account
-# -s /bin/false: no shell access (security)
-# -m: create home directory
 sudo useradd -r -s /bin/false -m metrics-collector
 
 # Optional: Add user to docker group (if monitoring Docker)
@@ -199,31 +181,22 @@ sudo usermod -aG docker metrics-collector
 ### 2. Create Installation Directory
 
 ```bash
-# Create directory for the application
 sudo mkdir -p /opt/metrics-collector
 
-# Copy the binary
 sudo cp target/release/metrics-collector /opt/metrics-collector/
 
-# Set ownership
 sudo chown -R metrics-collector:metrics-collector /opt/metrics-collector
 
-# Make binary executable
 sudo chmod 755 /opt/metrics-collector/metrics-collector
 ```
 
 ### 3. Verify Binary Works
 
-Test the binary before setting up the service:
-
 ```bash
-# Test run (will fail to connect to MongoDB, but verifies binary works)
 sudo -u metrics-collector /opt/metrics-collector/metrics-collector \
   --mongodb "mongodb://your-mongodb-host:27017" \
-  --key "1111-1111"
-
-# Press Ctrl+C to stop after a few seconds
-# You should see log output indicating connection attempts
+  --key "0001-0001"
+# Press Ctrl+C after a few seconds
 ```
 
 ---
@@ -233,64 +206,39 @@ sudo -u metrics-collector /opt/metrics-collector/metrics-collector \
 ### 1. Copy Service File
 
 ```bash
-# Navigate to the project directory (if not already there)
-cd /path/to/metrics-collector
-
-# Copy the systemd service file
 sudo cp metrics-collector.service /etc/systemd/system/
-
-# Set proper permissions
 sudo chmod 644 /etc/systemd/system/metrics-collector.service
 ```
 
 ### 2. Configure Service File
 
-Edit the service file to match your environment:
-
 ```bash
 sudo nano /etc/systemd/system/metrics-collector.service
 ```
 
-**Update these values:**
+Update `ExecStart`:
 
 ```ini
-# MongoDB connection string
-# Replace with your actual MongoDB URI
 ExecStart=/opt/metrics-collector/metrics-collector \
     --mongodb "mongodb://YOUR_MONGODB_HOST:27017" \
     --key "YOUR_NODE_KEY" \
     --database "monitoring"
-
-# Optional: Add --create-indexes on first run
-# Remove this flag after first run to improve startup time
-ExecStart=/opt/metrics-collector/metrics-collector \
-    --mongodb "mongodb://YOUR_MONGODB_HOST:27017" \
-    --key "YOUR_NODE_KEY" \
-    --database "monitoring" \
-    --create-indexes
 ```
 
-**For MongoDB with authentication:**
+For MongoDB with authentication:
 
 ```ini
 ExecStart=/opt/metrics-collector/metrics-collector \
     --mongodb "mongodb://username:password@host:27017/monitoring?authSource=admin" \
-    --key "1111-1111"
+    --key "0001-0001"
 ```
 
 ### 3. Enable and Start Service
 
 ```bash
-# Reload systemd to recognize the new service
 sudo systemctl daemon-reload
-
-# Enable the service to start on boot
 sudo systemctl enable metrics-collector
-
-# Start the service now
 sudo systemctl start metrics-collector
-
-# Check service status
 sudo systemctl status metrics-collector
 ```
 
@@ -300,11 +248,8 @@ Expected output:
      Loaded: loaded (/etc/systemd/system/metrics-collector.service; enabled)
      Active: active (running) since Mon 2024-01-15 10:30:00 UTC; 5s ago
    Main PID: 12345 (metrics-collect)
-      Tasks: 8
      Memory: 12.5M
         CPU: 100ms
-     CGroup: /system.slice/metrics-collector.service
-             └─12345 /opt/metrics-collector/metrics-collector --mongodb...
 ```
 
 ---
@@ -314,60 +259,57 @@ Expected output:
 ### 1. Check Service Status
 
 ```bash
-# View service status
 sudo systemctl status metrics-collector
-
-# View live logs
 sudo journalctl -u metrics-collector -f
-
-# View logs from the last hour
-sudo journalctl -u metrics-collector --since "1 hour ago"
-
-# View logs from today
-sudo journalctl -u metrics-collector --since today
 ```
 
 ### 2. Verify Data in MongoDB
 
-Connect to MongoDB and check if metrics are being stored:
+Wait ~65 seconds after startup, then check:
 
 ```javascript
-// Connect to MongoDB
 mongosh "mongodb://your-mongodb-host:27017"
-
-// Switch to monitoring database
 use monitoring
 
-// Check load average metrics (should have recent entries)
-db.load_average_metrics.find({ "node": "1111-1111" }).sort({ timestamp: -1 }).limit(5)
+// Load average — fields should be {avg, min, max} objects
+db.load_average_metrics.find({ "node": "0001-0001" }).sort({ timestamp: -1 }).limit(2)
+// Expected shape:
+// { "cpu_cores": 8, "load_1min": { "avg": 0.5, "min": 0.1, "max": 1.2 }, ... }
 
-// Check memory metrics
-db.memory_metrics.find({ "node": "1111-1111" }).sort({ timestamp: -1 }).limit(5)
+// Memory — total_mb and swap_total_mb are plain values; others are {avg, min, max}
+db.memory_metrics.find({ "node": "0001-0001" }).sort({ timestamp: -1 }).limit(2)
 
-// Check disk metrics
-db.disk_metrics.find({ "node": "1111-1111" }).sort({ timestamp: -1 }).limit(5)
+// Disk — unchanged nested structure
+db.disk_metrics.find({ "node": "0001-0001" }).sort({ timestamp: -1 }).limit(2)
 
-// Check docker metrics (if Docker is running)
-db.docker_metrics.find({ "node": "1111-1111" }).sort({ timestamp: -1 }).limit(5)
+// Docker — per-container cpu/memory are {avg, min, max}; network/block are plain
+db.docker_metrics.find({ "node": "0001-0001" }).sort({ timestamp: -1 }).limit(2)
 
-// Count total documents (should increase over time)
-db.load_average_metrics.countDocuments({ "node": "1111-1111" })
+// Confirm each collection grows by exactly 1 document per store_timeout seconds
+db.load_average_metrics.countDocuments({ "node": "0001-0001" })
 ```
 
-### 3. Test Automatic Restart
+### 3. Test Settings Reload
 
-Verify the service restarts automatically on failure:
+Change a timeout in MongoDB and confirm it takes effect after the next flush:
+
+```javascript
+// Lower collect_timeout to 10 seconds
+db.MonitoringSettings.updateOne(
+  { "key": "0001-0001" },
+  { $set: { "collect_timeout": 10 } }
+)
+```
+
+After the current 60-second window ends, the new value will be active. No restart needed.
+
+### 4. Test Automatic Restart
 
 ```bash
-# Kill the process
 sudo pkill metrics-collector
-
-# Wait a few seconds, then check status
 sleep 5
 sudo systemctl status metrics-collector
-
 # Should show: active (running)
-# And "Restart" count should have increased
 ```
 
 ---
@@ -376,7 +318,6 @@ sudo systemctl status metrics-collector
 
 ### Service Won't Start
 
-**Check logs for errors:**
 ```bash
 sudo journalctl -u metrics-collector -n 50 --no-pager
 ```
@@ -385,95 +326,88 @@ sudo journalctl -u metrics-collector -n 50 --no-pager
 
 1. **MongoDB connection failed**
    - Verify MongoDB is running: `systemctl status mongod`
-   - Check network connectivity: `telnet mongodb-host 27017`
+   - Check network: `telnet mongodb-host 27017`
    - Verify credentials in connection string
-   - Check firewall: `sudo ufw status`
 
-2. **Permission denied**
+2. **Settings not found**
+   - The settings document must use the new three-field format
+   - Check: `db.MonitoringSettings.findOne({ "key": "your-key" })`
+   - Must have `collect_timeout`, `collect_docker_timeout`, `store_timeout` fields
+
+3. **Permission denied**
    - Check binary permissions: `ls -l /opt/metrics-collector/`
    - Verify user exists: `id metrics-collector`
-   - Check Docker socket permissions: `ls -l /var/run/docker.sock`
-
-3. **Settings not found**
-   - Verify MongoDB has the configuration document
-   - Check the key matches: `db.MonitoringSettings.findOne({ "key": "1111-1111" })`
+   - Check Docker socket: `ls -l /var/run/docker.sock`
 
 ### Docker Stats Not Working
 
-If Docker statistics are not being collected:
-
 ```bash
-# Verify Docker is running
 sudo systemctl status docker
-
-# Check Docker socket exists
 ls -l /var/run/docker.sock
-
-# Add user to docker group (if not already done)
 sudo usermod -aG docker metrics-collector
-
-# Restart service after group change
 sudo systemctl restart metrics-collector
-
-# Test Docker access manually
 sudo -u metrics-collector docker ps
 ```
 
-### High Memory Usage
+### No Data Appearing in MongoDB
 
-If the service uses too much memory:
+The application buffers samples for `store_timeout` seconds before writing. With the default 60-second window, the first document appears after ~65 seconds. If no data appears after 2 minutes:
 
 ```bash
-# Check current memory usage
-systemctl status metrics-collector | grep Memory
+# Check logs for flush messages
+sudo journalctl -u metrics-collector | grep -E "flush|store|sample"
 
-# Lower the memory limit in service file
-sudo nano /etc/systemd/system/metrics-collector.service
-# Change: MemoryLimit=512M to MemoryLimit=256M
-
-# Reload and restart
-sudo systemctl daemon-reload
-sudo systemctl restart metrics-collector
+# Verify settings document has correct fields
+# (old metric_settings format is no longer supported)
+db.MonitoringSettings.findOne({ "key": "your-key" })
 ```
 
 ### Logs Not Appearing
 
 ```bash
-# Check systemd journal is working
 sudo systemctl status systemd-journald
-
-# View all logs for the service
 sudo journalctl -u metrics-collector --no-pager
-
-# Enable persistent logging (survives reboots)
 sudo mkdir -p /var/log/journal
 sudo systemctl restart systemd-journald
 ```
 
 ---
 
+## Migrating from Old Settings Format
+
+If you have an existing settings document with `metric_settings`, migrate it:
+
+```javascript
+use monitoring
+
+db.MonitoringSettings.updateOne(
+  { "key": "your-key" },
+  {
+    $set: {
+      "collect_timeout": 5,
+      "collect_docker_timeout": 20,
+      "store_timeout": 60
+    },
+    $unset: { "metric_settings": "" }
+  }
+)
+```
+
+Then restart the service.
+
+---
+
 ## Uninstallation
 
-To completely remove the metrics collector:
-
 ```bash
-# Stop and disable the service
 sudo systemctl stop metrics-collector
 sudo systemctl disable metrics-collector
-
-# Remove service file
 sudo rm /etc/systemd/system/metrics-collector.service
-
-# Reload systemd
 sudo systemctl daemon-reload
-
-# Remove application directory
 sudo rm -rf /opt/metrics-collector
-
-# Remove user (optional)
 sudo userdel -r metrics-collector
 
-# Remove MongoDB data (optional - only if you want to delete all metrics)
+# Remove MongoDB data (optional)
 # mongosh "mongodb://your-mongodb-host:27017"
 # use monitoring
 # db.dropDatabase()
@@ -483,66 +417,44 @@ sudo userdel -r metrics-collector
 
 ## Multiple Servers Setup
 
-To deploy on multiple servers:
-
-1. **Create unique keys for each server:**
+1. **Create a settings document per server:**
    ```javascript
    db.MonitoringSettings.insertOne({
      "key": "server-01",
-     "metric_settings": { /* same as before */ }
+     "collect_timeout": 5,
+     "collect_docker_timeout": 20,
+     "store_timeout": 60
    })
 
    db.MonitoringSettings.insertOne({
      "key": "server-02",
-     "metric_settings": { /* same as before */ }
+     "collect_timeout": 5,
+     "collect_docker_timeout": 20,
+     "store_timeout": 60
    })
    ```
 
 2. **Deploy binary to each server**
 
-3. **Configure service file with correct key:**
+3. **Configure each service with the correct key:**
    - Server 1: `--key "server-01"`
    - Server 2: `--key "server-02"`
 
-4. **Start services on all servers**
-
-5. **Query metrics by node:**
+4. **Query metrics by node:**
    ```javascript
-   // Get metrics from specific server
    db.load_average_metrics.find({ "node": "server-01" })
-
-   // Get metrics from all servers
-   db.load_average_metrics.find({})
+   db.load_average_metrics.find({})  // All servers
    ```
 
 ---
 
 ## Production Recommendations
 
-1. **Use MongoDB Authentication**
-   - Don't run MongoDB without authentication in production
-   - Use strong passwords and user-specific permissions
-
-2. **Set Up Log Rotation**
-   - Systemd handles this automatically
-   - Configure max log size: edit `/etc/systemd/journald.conf`
-
-3. **Monitor the Monitor**
-   - Set up alerts if the service stops
-   - Use systemd email notifications or external monitoring
-
-4. **Regular Backups**
-   - Back up MongoDB data regularly
-   - Export metrics periodically for long-term storage
-
-5. **Resource Limits**
-   - Set appropriate CPU and memory limits
-   - Monitor resource usage and adjust as needed
-
-6. **Security**
-   - Run as non-root user (already configured)
-   - Restrict network access to MongoDB
-   - Use firewall rules to protect your servers
+1. **Use MongoDB Authentication** — don't run without auth in production
+2. **Set TTL indexes** — keep database size manageable
+3. **Monitor the Monitor** — set alerts if the service stops
+4. **Regular Backups** — back up MongoDB data regularly
+5. **Security** — run as non-root (already configured), restrict MongoDB network access
 
 ---
 

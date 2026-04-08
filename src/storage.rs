@@ -16,6 +16,7 @@ pub enum StorageError {
     #[error("MongoDB insert failed: {0}")]
     InsertError(#[from] mongodb::error::Error),
 
+    #[allow(dead_code)]
     #[error("Invalid document format: {0}")]
     InvalidDocument(String),
 }

@@ -1,36 +1,36 @@
 # Metrics Collector
 
-A production-ready, extensible server monitoring tool written in Rust that collects system metrics and stores them in MongoDB.
+A production-ready, extensible server monitoring tool written in Rust that collects system metrics and stores aggregated documents in MongoDB.
 
 ## Features
 
 - **Multiple Metric Types**
-  - Load Average (1min, 5min, 15min)
-  - Memory Usage (RAM and swap)
-  - Disk Space (all mounted filesystems)
-  - Docker Container Stats (CPU, memory, I/O)
+  - Load Average (1min, 5min, 15min) with avg/min/max per window
+  - Memory Usage (RAM and swap) with avg/min/max per window
+  - Disk Space (all mounted filesystems, last-sample per window)
+  - Docker Container Stats (CPU and memory aggregated, I/O last-sample)
+
+- **60-Second Aggregation Windows**
+  - Buffers raw samples in memory; writes one document per minute per metric
+  - Each numeric field stored as `{ "avg": …, "min": …, "max": … }`
+  - Constant fields (cpu_cores, total_mb, etc.) stored as plain values
+
+- **Live Configuration Reload**
+  - Settings re-read from MongoDB after every flush — no restart needed
+  - Three shared timeout values control all metrics
 
 - **Extensible Architecture**
-  - Easy to add new metric types
-  - Trait-based design for type safety
+  - Trait-based design for adding new metric types
   - Well-documented extension guide
 
 - **Production Ready**
-  - SystemD service integration
-  - Automatic restart on failure
-  - Structured logging
-  - Resource limits
-  - Security hardening
-
-- **Configurable**
-  - MongoDB-based configuration
-  - Per-metric collection intervals
-  - Per-metric storage collections
-  - Multi-server support
+  - SystemD service integration with automatic restart
+  - Structured logging (JSON for systemd, pretty for terminal)
+  - Resource limits and security hardening
 
 - **High Performance**
   - Async/concurrent execution with Tokio
-  - Independent metric collection tasks
+  - Dual-timer `select!` loop per metric task
   - Minimal resource usage (<1% CPU, <20MB RAM)
 
 ## Quick Start
@@ -48,37 +48,19 @@ A production-ready, extensible server monitoring tool written in Rust that colle
 cargo build --release
 ```
 
-The compiled binary will be at `target/release/metrics-collector`
+Binary location: `target/release/metrics-collector`
 
 ### Configure MongoDB
 
 ```javascript
-// Connect to MongoDB
 mongosh "mongodb://localhost:27017"
-
-// Create database and configuration
 use monitoring
 
 db.MonitoringSettings.insertOne({
-  "key": "1111-1111",
-  "metric_settings": {
-    "LoadAverage": {
-      "timeout": 5,
-      "collection": "load_average_metrics"
-    },
-    "Memory": {
-      "timeout": 10,
-      "collection": "memory_metrics"
-    },
-    "DiskSpace": {
-      "timeout": 30,
-      "collection": "disk_metrics"
-    },
-    "DockerStats": {
-      "timeout": 15,
-      "collection": "docker_metrics"
-    }
-  }
+  "key": "0001-0001",
+  "collect_timeout": 5,           // seconds between samples (LoadAverage, Memory, DiskSpace)
+  "collect_docker_timeout": 20,   // seconds between Docker samples
+  "store_timeout": 60             // aggregation window length in seconds
 })
 ```
 
@@ -87,74 +69,47 @@ db.MonitoringSettings.insertOne({
 ```bash
 ./target/release/metrics-collector \
   --mongodb "mongodb://localhost:27017" \
-  --key "1111-1111"
+  --key "0001-0001"
 ```
+
+The first aggregated documents appear after ~65 seconds (one full window).
 
 ## Documentation
 
-Comprehensive documentation is available in the `docs/` directory:
-
-### Project Documentation
-
-- **[Deployment Guide](docs/deployment.md)** - Complete deployment instructions
-  - Building and installation
-  - SystemD service setup
-  - MongoDB configuration
-  - Troubleshooting
-  - Multi-server deployment
-
-- **[Architecture](docs/architecture.md)** - System design and implementation
-  - Project structure
-  - Core architecture
-  - Component details
-  - Design patterns
-  - Performance considerations
-
-- **[Adding New Metrics](docs/adding-new-metrics.md)** - Extension guide
-  - Step-by-step tutorial
-  - Complete examples
-  - Best practices
-  - Testing guide
-
-### Rust Learning Resources
-
-- **[Rust Intro Guide](docs/rust-intro-guide.md)** - Learn Rust through this project
-  - Ownership and borrowing explained
-  - Async/await patterns
-  - Real examples from the codebase
-  - Perfect for beginners
-
-- **[Rust Cheatsheet](docs/rust-cheatsheet.md)** - Quick reference
-  - Syntax quick reference
-  - Common patterns
-  - Standard library basics
-  - Project-specific examples
+- **[Deployment Guide](docs/deployment.md)** — Building, MongoDB setup, SystemD service, troubleshooting
+- **[Architecture](docs/architecture.md)** — System design, aggregation pipeline, data flow, design patterns
+- **[Adding New Metrics](docs/adding-new-metrics.md)** — Step-by-step tutorial with code examples
+- **[Rust Intro Guide](docs/rust-intro-guide.md)** — Learn Rust through this project
+- **[Rust Cheatsheet](docs/rust-cheatsheet.md)** — Quick reference with project-specific patterns
 
 ## Project Structure
 
 ```
-rust-project/
+metrics-collector/
 ├── Cargo.toml                    # Dependencies and build configuration
 ├── metrics-collector.service     # SystemD service file
 ├── README.md                     # This file
 │
 ├── src/
 │   ├── main.rs                  # Application entry point
-│   ├── config.rs                # MongoDB configuration management
+│   ├── config.rs                # MongoDB configuration management + live reload
 │   ├── storage.rs               # MongoDB storage operations
-│   ├── scheduler.rs             # Tokio-based task scheduler
+│   ├── aggregator.rs            # In-memory buffering and avg/min/max aggregation
+│   ├── scheduler.rs             # Dual-timer task scheduler
 │   │
 │   └── metrics/                 # Metric collectors
-│       ├── mod.rs              # MetricCollector trait
+│       ├── mod.rs              # MetricCollector trait + factory
 │       ├── load_average.rs     # Load average metric
 │       ├── memory.rs           # Memory usage metric
 │       ├── disk.rs             # Disk space metric
 │       └── docker.rs           # Docker stats metric
 │
 └── docs/
-    ├── deployment.md           # Deployment guide
-    ├── architecture.md         # Architecture documentation
-    └── adding-new-metrics.md   # Guide for adding metrics
+    ├── deployment.md
+    ├── architecture.md
+    ├── adding-new-metrics.md
+    ├── rust-intro-guide.md
+    └── rust-cheatsheet.md
 ```
 
 ## Usage
@@ -165,37 +120,31 @@ rust-project/
 metrics-collector --mongodb <URI> --key <KEY> [OPTIONS]
 ```
 
-**Required:**
-- `--mongodb <URI>` - MongoDB connection string
-- `--key <KEY>` - Configuration key (node identifier)
-
-**Optional:**
-- `--database <NAME>` - Database name (default: "monitoring")
-- `--create-indexes` - Create database indexes on startup
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--mongodb <URI>` | Yes | MongoDB connection string |
+| `--key <KEY>` | Yes | Node identifier (matches `key` in MonitoringSettings) |
+| `--database <NAME>` | No | Database name (default: `monitoring`) |
+| `--create-indexes` | No | Create `(node, timestamp)` indexes on startup |
 
 ### Examples
 
-Basic usage:
 ```bash
+# Basic
 metrics-collector --mongodb "mongodb://localhost:27017" --key "server-01"
-```
 
-With authentication:
-```bash
+# With authentication
 metrics-collector \
   --mongodb "mongodb://user:pass@host:27017/monitoring?authSource=admin" \
   --key "server-01"
-```
 
-Custom database:
-```bash
+# Custom database
 metrics-collector \
   --mongodb "mongodb://localhost:27017" \
-  --key "server-01"got an errorprod_monitoring"
-```
+  --key "server-01" \
+  --database "prod_monitoring"
 
-With index creation:
-```bash
+# Create indexes on first run
 metrics-collector \
   --mongodb "mongodb://localhost:27017" \
   --key "server-01" \
@@ -204,346 +153,197 @@ metrics-collector \
 
 ### Environment Variables
 
-- `RUST_LOG` - Set logging level (debug, info, warn, error)
-  ```bash
-  RUST_LOG=debug metrics-collector --mongodb "..." --key "..."
-  ```
+```bash
+RUST_LOG=debug metrics-collector --mongodb "..." --key "..."
+```
 
-## Metrics
+## Stored Document Formats
 
-### Load Average
+### load_average_metrics (one per 60s)
+```json
+{
+  "node": "0001-0001",
+  "timestamp": "2026-04-08T12:01:00Z",
+  "sample_count": 12,
+  "cpu_cores": 8,
+  "load_1min":  { "avg": 1.42, "min": 0.80, "max": 2.30 },
+  "load_5min":  { "avg": 1.18, "min": 0.90, "max": 1.50 },
+  "load_15min": { "avg": 0.95, "min": 0.85, "max": 1.10 }
+}
+```
 
-Collects system load averages for 1, 5, and 15 minute intervals.
+### memory_metrics (one per 60s)
+```json
+{
+  "node": "0001-0001",
+  "timestamp": "2026-04-08T12:01:00Z",
+  "sample_count": 12,
+  "total_mb": 24048,
+  "swap_total_mb": 0,
+  "available_mb":      { "avg": 19200.0, "min": 18000.0, "max": 21000.0 },
+  "used_percent":      { "avg": 20.2,    "min": 12.8,    "max": 25.1    },
+  "swap_used_percent": { "avg": 0.0,     "min": 0.0,     "max": 0.0     }
+}
+```
 
-**Collection:** Every 5 seconds (configurable)
-**Fields:** `load_1min`, `load_5min`, `load_15min`, `cpu_cores`
+### disk_metrics (one per 60s, last sample of window)
+```json
+{
+  "node": "0001-0001",
+  "timestamp": "2026-04-08T12:01:00Z",
+  "disks": [
+    { "mount_point": "/", "filesystem": "ext4",
+      "total_gb": 500.0, "used_gb": 250.0, "available_gb": 250.0, "used_percent": 50.0 }
+  ]
+}
+```
 
-### Memory
+### docker_metrics (one per 60s, 3 samples aggregated)
+```json
+{
+  "node": "0001-0001",
+  "timestamp": "2026-04-08T12:01:00Z",
+  "sample_count": 3,
+  "containers": [
+    {
+      "id": "531c5b818fe7", "name": "my-app",
+      "memory_limit_mb": 2048.0,
+      "cpu_percent":    { "avg": 25.1, "min": 18.0, "max": 42.5 },
+      "memory_used_mb": { "avg": 512.0, "min": 498.0, "max": 530.0 },
+      "memory_percent": { "avg": 25.0, "min": 24.3, "max": 25.9 },
+      "network_rx_mb": 56.87,
+      "network_tx_mb": 50.69,
+      "block_read_mb": 86.54,
+      "block_write_mb": 0.10
+    }
+  ]
+}
+```
 
-Tracks RAM and swap usage with detailed breakdown.
+> `network_rx_mb`, `network_tx_mb`, `block_read_mb`, `block_write_mb` are **cumulative totals since container start**, not per-window rates. The last sample value is stored.
 
-**Collection:** Every 10 seconds (configurable)
-**Fields:** `total_mb`, `used_mb`, `available_mb`, `free_mb`, `used_percent`, swap fields
+## Configuration
 
-### Disk Space
+### Settings Document
 
-Monitors disk usage for all mounted filesystems.
+```javascript
+{
+  "key": "0001-0001",
+  "collect_timeout": 5,          // seconds between raw samples (LoadAverage, Memory, DiskSpace)
+  "collect_docker_timeout": 20,  // seconds between raw Docker samples
+  "store_timeout": 60            // aggregation window length — how often to write to MongoDB
+}
+```
 
-**Collection:** Every 30 seconds (configurable)
-**Fields:** Per-disk: `mount_point`, `filesystem`, `total_gb`, `used_gb`, `available_gb`, `used_percent`
+### Live Reload
 
-### Docker Stats
+Settings are re-read from MongoDB after **every flush** (every `store_timeout` seconds). Update any value and it takes effect after the current window completes:
 
-Collects resource usage for all running containers.
+```javascript
+// Example: slow down collection to save resources
+db.MonitoringSettings.updateOne(
+  { "key": "0001-0001" },
+  { $set: { "collect_timeout": 10, "store_timeout": 120 } }
+)
+// No restart needed — takes effect after the next flush
+```
 
-**Collection:** Every 15 seconds (configurable)
-**Fields:** Per-container: `id`, `name`, `cpu_percent`, `memory_used_mb`, `memory_limit_mb`, network and block I/O stats
+## Querying Data
+
+```javascript
+// Latest load average document
+db.load_average_metrics.find({ "node": "0001-0001" }).sort({ timestamp: -1 }).limit(1).pretty()
+
+// Average load over the last hour
+db.load_average_metrics.find({
+  "node": "0001-0001",
+  "timestamp": { $gte: new Date(Date.now() - 3600000) }
+}).sort({ timestamp: -1 })
+
+// Memory usage trends
+db.memory_metrics.find({ "node": "0001-0001" }).sort({ timestamp: -1 }).limit(60)
+
+// High-load windows (load_1min avg > 4 on an 8-core machine)
+db.load_average_metrics.find({ "node": "0001-0001", "load_1min.avg": { $gt: 4 } })
+```
+
+## Adding New Metrics
+
+1. Create a file in `src/metrics/` and implement `MetricCollector`
+2. Add to `create_all_collectors()` in `src/metrics/mod.rs`
+3. Add collection name to `collection_for()` in `src/scheduler.rs`
+4. Rebuild and deploy
+
+No MongoDB document changes needed. See [Adding New Metrics Guide](docs/adding-new-metrics.md).
 
 ## SystemD Service
 
-### Installation
-
 ```bash
-# Create user
+# Install
 sudo useradd -r -s /bin/false metrics-collector
-
-# Install binary
 sudo mkdir -p /opt/metrics-collector
 sudo cp target/release/metrics-collector /opt/metrics-collector/
 sudo chown -R metrics-collector:metrics-collector /opt/metrics-collector
-
-# Install service
 sudo cp metrics-collector.service /etc/systemd/system/
+
+# Configure (update ExecStart with your MongoDB URI and key)
+sudo nano /etc/systemd/system/metrics-collector.service
+
+# Start
 sudo systemctl daemon-reload
 sudo systemctl enable metrics-collector
 sudo systemctl start metrics-collector
 ```
 
-### Management
-
 ```bash
-# Check status
 sudo systemctl status metrics-collector
-
-# View logs
 sudo journalctl -u metrics-collector -f
-
-# Restart
 sudo systemctl restart metrics-collector
-
-# Stop
-sudo systemctl stop metrics-collector
 ```
 
 ## Development
 
-### Building
-
 ```bash
-# Debug build
-cargo build
-
-# Release build (optimized)
-cargo build --release
-
-# With all optimizations
-cargo build --release
+cargo build           # Debug build
+cargo build --release # Release build
+cargo check           # Fast type check without producing binary
+cargo test            # Run tests
+cargo clippy          # Lint
+cargo fmt             # Format
 ```
-
-### Testing
-
-```bash
-# Run all tests
-cargo test
-
-# Run with output
-cargo test -- --nocapture
-
-# Run specific test
-cargo test test_name
-```
-
-### Linting
-
-```bash
-# Check code
-cargo clippy
-
-# Format code
-cargo fmt
-
-# Check without modifications
-cargo fmt -- --check
-```
-
-## Adding New Metrics
-
-Adding new metrics is straightforward thanks to the extensible architecture:
-
-1. Create a new file in `src/metrics/` (e.g., `network.rs`)
-2. Implement the `MetricCollector` trait
-3. Add to `create_all_collectors()` in `src/metrics/mod.rs`
-4. Add configuration to MongoDB
-5. Rebuild and deploy
-
-See [Adding New Metrics Guide](docs/adding-new-metrics.md) for detailed instructions and examples.
-
-## Configuration
-
-### MongoDB Settings Document
-
-```javascript
-{
-  // Unique identifier for this server/node
-  "key": "1111-1111",
-
-  // Metric-specific settings
-  "metric_settings": {
-    "<MetricName>": {
-      // Collection interval in seconds
-      "timeout": 10,
-
-      // MongoDB collection name for storing this metric
-      "collection": "metric_collection_name"
-    }
-  }
-}
-```
-
-### Example Configuration
-
-```javascript
-{
-  "key": "production-server-01",
-  "metric_settings": {
-    "LoadAverage": {
-      "timeout": 5,
-      "collection": "load_avg"
-    },
-    "Memory": {
-      "timeout": 10,
-      "collection": "memory"
-    },
-    "DiskSpace": {
-      "timeout": 60,
-      "collection": "disk"
-    },
-    "DockerStats": {
-      "timeout": 15,
-      "collection": "docker"
-    }
-  }
-}
-```
-
-### Updating Configuration
-
-Configuration settings are loaded from MongoDB **once at startup**. To apply changes:
-
-**To update settings:**
-1. Update the MongoDB document:
-   ```javascript
-   db.MonitoringSettings.updateOne(
-     { "key": "1111-1111" },
-     { $set: { "metric_settings.LoadAverage.timeout": 10 } }
-   )
-   ```
-
-2. Restart the application:
-   ```bash
-   # If running manually
-   # Press Ctrl+C and restart
-
-   # If running as systemd service
-   sudo systemctl restart metrics-collector
-   ```
-
-**Important notes:**
-- **Restart required:** YES - settings are loaded only at startup
-- **Recompile required:** NO - settings are data, not code
-- The application does not hot-reload configuration changes
-- All settings changes require a restart to take effect
-
-## Querying Data
-
-### MongoDB Queries
-
-Get recent metrics:
-```javascript
-// Load average from last hour
-db.load_average_metrics.find({
-  "node": "1111-1111",
-  "timestamp": { $gte: new Date(Date.now() - 3600000) }
-}).sort({ timestamp: -1 })
-
-// Memory usage trends
-db.memory_metrics.find({
-  "node": "1111-1111"
-}).sort({ timestamp: -1 }).limit(100)
-
-// Docker containers by CPU usage
-db.docker_metrics.find({
-  "node": "1111-1111"
-}).sort({ "containers.cpu_percent": -1 })
-```
-
-Create indexes for better performance:
-```javascript
-// Compound index for efficient node + time queries
-db.load_average_metrics.createIndex({ "node": 1, "timestamp": -1 })
-
-// TTL index to auto-delete old data (30 days)
-db.load_average_metrics.createIndex(
-  { "timestamp": 1 },
-  { expireAfterSeconds: 2592000 }
-)
-```
-
-## Performance
-
-### Resource Usage
-
-Typical resource consumption:
-- **CPU:** < 1% on modern hardware
-- **Memory:** 10-20 MB
-- **Network:** ~5 MB/hour to MongoDB
-- **Disk I/O:** Minimal (all metrics stored remotely)
-
-### Scaling
-
-- **Single server:** Handles 100+ metrics at 1-second intervals
-- **Multiple servers:** Each server runs independently
-- **MongoDB:** Handles thousands of inserts per second
-
-### Optimization
-
-The binary is already optimized for production:
-- Release build with LTO and optimizations
-- Async/concurrent execution
-- Minimal allocations
-- Efficient BSON serialization
-
-## Security
-
-### Built-in Security Features
-
-- Runs as non-root user
-- SystemD security options enabled
-- No shell access for service user
-- Resource limits prevent DOS
-- MongoDB credentials masked in logs
-
-### Recommendations
-
-1. Use MongoDB authentication
-2. Use TLS for MongoDB connections
-3. Restrict network access with firewall
-4. Regular security updates
-5. Monitor logs for anomalies
 
 ## Troubleshooting
 
-### Common Issues
-
-**Service won't start:**
+**No data after startup:** The first document appears after one full `store_timeout` window (~65 seconds with defaults). Check logs for flush messages:
 ```bash
-# Check logs
-sudo journalctl -u metrics-collector -n 50
+sudo journalctl -u metrics-collector | grep -E "flush|store|Reloading"
+```
 
-# Verify MongoDB connection
-telnet mongodb-host 27017
-
-# Check configuration
-mongosh --eval 'db.MonitoringSettings.findOne({ key: "1111-1111" })'
+**Settings not loading:**
+```javascript
+// Verify the settings document has the new format (three flat fields)
+db.MonitoringSettings.findOne({ "key": "your-key" })
 ```
 
 **Docker stats failing:**
 ```bash
-# Verify Docker is running
-sudo systemctl status docker
-
-# Check socket permissions
-ls -l /var/run/docker.sock
-
-# Add user to docker group
 sudo usermod -aG docker metrics-collector
 sudo systemctl restart metrics-collector
 ```
 
-**No data in MongoDB:**
-```bash
-# Check configuration exists
-mongosh --eval 'db.MonitoringSettings.findOne({ key: "1111-1111" })'
+See [Deployment Guide](docs/deployment.md) for full troubleshooting steps.
 
-# Verify collection names
-mongosh --eval 'db.getCollectionNames()'
+## Security
 
-# Check for any documents
-mongosh --eval 'db.load_average_metrics.countDocuments({})'
-```
-
-See [Deployment Guide](docs/deployment.md) for more troubleshooting steps.
+- Runs as non-root user
+- SystemD hardening options enabled
+- MongoDB credentials masked in all log output
+- Docker socket access: read-only stats queries only
 
 ## License
 
-[Choose your license - MIT, Apache 2.0, etc.]
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes with tests
-4. Submit a pull request
-
-## Support
-
-For issues, questions, or feature requests:
-- Open an issue on GitHub
-- Check the documentation in `docs/`
-- Review existing issues and discussions
+[Choose your license — MIT, Apache 2.0, etc.]
 
 ---
 
-**Built with Rust** 🦀 - For performance, safety, and reliability
+**Built with Rust** 🦀
