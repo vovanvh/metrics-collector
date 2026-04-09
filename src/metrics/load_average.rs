@@ -4,11 +4,11 @@
 // These values indicate the average number of processes in the run queue
 // or waiting for disk I/O over the specified time periods.
 
+use sysinfo::System;
 use async_trait::async_trait;
 use bson::{doc, Document};
 use chrono::Utc;
 use std::error::Error;
-use sysinfo::System;
 use tracing::debug;
 
 use super::MetricCollector;
@@ -27,17 +27,12 @@ use super::MetricCollector;
 /// - Linux: Full support via /proc/loadavg
 /// - macOS: Full support via sysctl
 /// - Windows: Not available (returns 0.0)
-pub struct LoadAverageCollector {
-    /// System information provider
-    system: System,
-}
+pub struct LoadAverageCollector {}
 
 impl LoadAverageCollector {
     /// Creates a new LoadAverageCollector instance
     pub fn new() -> Self {
-        LoadAverageCollector {
-            system: System::new(),
-        }
+        LoadAverageCollector {}
     }
 }
 

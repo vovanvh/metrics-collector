@@ -855,6 +855,39 @@ loop {
 }
 ```
 
+### select! — Await Multiple Futures
+
+```rust
+use tokio::select;
+
+// Run the branch whose future completes first
+select! {
+    _ = timer.tick()      => { /* timer fired */ }
+    _ = &mut flush_sleep  => { /* deadline reached */ }
+    msg = rx.recv()       => { /* message received */ }
+}
+```
+
+### tokio::pin! — Pin a Future to the Stack
+
+Required for futures that are `!Unpin` (e.g. `tokio::time::sleep`) when you need
+to poll them multiple times across loop iterations:
+
+```rust
+let flush_sleep = tokio::time::sleep(Duration::from_secs(60));
+tokio::pin!(flush_sleep);  // now &mut flush_sleep can be used in select!
+
+loop {
+    select! {
+        _ = collect_timer.tick() => { /* collect */ }
+        _ = &mut flush_sleep     => { break; }  // fires after 60s
+    }
+}
+```
+
+Without `tokio::pin!`, the compiler will reject `&mut flush_sleep` inside `select!` because
+`Sleep` is `!Unpin` — it cannot be moved after being polled.
+
 ---
 
 ## Macros
@@ -1182,8 +1215,11 @@ fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {
 async fn main() -> Result<()> {
     init_logging();
     let args = parse_arguments()?;
-    let config = ConfigManager::new(&args.mongodb_uri, Some(&args.database_name)).await?;
-    let settings = config.load_settings(&args.config_key).await?;
+    let config_manager = ConfigManager::new(&args.mongodb_uri, Some(&args.database_name)).await?;
+    let settings = config_manager.load_settings(&args.config_key).await?;
+    let storage = MetricStorage::new(config_manager.client(), config_manager.database_name());
+    let scheduler = MetricScheduler::new(config_manager, storage, args.config_key.clone());
+    scheduler.start(create_all_collectors(), settings).await;
     Ok(())
 }
 ```
@@ -1200,12 +1236,40 @@ let collectors: Vec<Box<dyn MetricCollector>> = vec![
 ### Arc Pattern for Sharing
 
 ```rust
-let settings = Arc::new(settings);
+let config_manager = Arc::new(config_manager);
 let storage = Arc::new(storage);
 
 for collector in collectors {
-    let settings = Arc::clone(&settings);
-    tokio::spawn(async move { /* use settings */ });
+    let config_mgr = Arc::clone(&config_manager);
+    let storage    = Arc::clone(&storage);
+    tokio::spawn(async move { run_standard_task(..., config_mgr, storage, ...).await });
+}
+```
+
+### Dual-Timer Collect/Flush Pattern
+
+```rust
+loop {
+    let mut collect_timer = interval(Duration::from_secs(settings.collect_timeout));
+    let flush_sleep = tokio::time::sleep(Duration::from_secs(settings.store_timeout));
+    tokio::pin!(flush_sleep);
+
+    // Collect samples until flush deadline
+    loop {
+        select! {
+            _ = collect_timer.tick() => { buffer.push(&collector.collect(&node_id).await?); }
+            _ = &mut flush_sleep     => { break; }
+        }
+    }
+
+    // Flush aggregated document to MongoDB
+    if let Some(doc) = buffer.flush(&node_id) {
+        storage.store_metric_safe(collection, metric_name, doc).await;
+        // Reload settings from MongoDB so changes take effect next window
+        if let Ok(new) = config_manager.reload_settings(&node_id).await {
+            settings = new;
+        }
+    }
 }
 ```
 

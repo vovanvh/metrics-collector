@@ -23,53 +23,54 @@ This document provides a comprehensive overview of the Metrics Collector's archi
 
 The Metrics Collector is a lightweight, extensible server monitoring tool that:
 - Collects system metrics (CPU, memory, disk, Docker)
-- Stores metrics in MongoDB with configurable intervals
+- Buffers raw samples in memory and writes one aggregated document per minute to MongoDB
 - Supports multiple servers with individual configurations
 - Runs as a systemd service for reliability
 
 ### Key Features
 
 - **Async/Concurrent**: Uses Tokio for efficient concurrent metric collection
+- **Aggregated Storage**: Buffers 60-second windows; stores avg/min/max instead of raw samples
 - **Extensible**: Easy to add new metric types via trait system
-- **Configurable**: MongoDB-based configuration for dynamic updates
+- **Configurable**: MongoDB-based configuration with live reload after every flush
 - **Reliable**: Automatic restart, graceful error handling
-- **Production-Ready**: SystemD integration, structured logging, resource limits
 
 ### High-Level Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   Metrics Collector                     │
-│                                                         │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐       │
-│  │   Load     │  │   Memory   │  │    Disk    │       │
-│  │  Average   │  │ Collector  │  │ Collector  │  ...  │
-│  │ Collector  │  │            │  │            │       │
-│  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘       │
-│        │                │                │             │
-│        └────────────────┼────────────────┘             │
-│                         │                              │
-│                  ┌──────▼──────┐                       │
-│                  │  Scheduler  │                       │
-│                  │   (Tokio)   │                       │
-│                  └──────┬──────┘                       │
-│                         │                              │
-│                  ┌──────▼──────┐                       │
-│                  │   Storage   │                       │
-│                  │   Manager   │                       │
-│                  └──────┬──────┘                       │
-└─────────────────────────┼───────────────────────────────┘
-                          │
-                  ┌───────▼────────┐
-                  │    MongoDB     │
-                  │  ┌──────────┐  │
-                  │  │Settings  │  │
-                  │  └──────────┘  │
-                  │  ┌──────────┐  │
-                  │  │ Metrics  │  │
-                  │  │Collections│ │
-                  │  └──────────┘  │
-                  └────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                        Metrics Collector                         │
+│                                                                  │
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌────────────┐  │
+│  │   Load    │  │  Memory   │  │   Disk    │  │   Docker   │  │
+│  │ Collector │  │ Collector │  │ Collector │  │ Collector  │  │
+│  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬──────┘  │
+│        │collect        │              │               │collect   │
+│        ▼ every 5s      ▼ every 5s     ▼ every 5s      ▼ every 20s│
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌────────────┐  │
+│  │  Metric   │  │  Metric   │  │  Metric   │  │   Docker   │  │
+│  │  Buffer   │  │  Buffer   │  │  Buffer   │  │   Buffer   │  │
+│  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬──────┘  │
+│        │flush every 60s (store_timeout)               │         │
+│        └──────────────────┬──────────────────────────┘          │
+│                           ▼                                      │
+│                   ┌──────────────┐                               │
+│                   │   Storage    │                               │
+│                   │   Manager   │                                │
+│                   └──────┬───────┘                               │
+│                          │ after store: reload settings          │
+└──────────────────────────┼───────────────────────────────────────┘
+                           │
+                   ┌───────▼────────┐
+                   │    MongoDB     │
+                   │  ┌──────────┐  │
+                   │  │Settings  │  │
+                   │  └──────────┘  │
+                   │  ┌──────────┐  │
+                   │  │ Metrics  │  │
+                   │  │Collections│ │
+                   │  └──────────┘  │
+                   └────────────────┘
 ```
 
 ---
@@ -77,7 +78,7 @@ The Metrics Collector is a lightweight, extensible server monitoring tool that:
 ## Project Structure
 
 ```
-rust-project/
+metrics-collector/
 ├── Cargo.toml                    # Dependencies and build configuration
 ├── metrics-collector.service     # SystemD service file
 │
@@ -85,6 +86,7 @@ rust-project/
 │   ├── main.rs                  # Application entry point
 │   ├── config.rs                # MongoDB configuration management
 │   ├── storage.rs               # MongoDB storage operations
+│   ├── aggregator.rs            # In-memory buffering and aggregation
 │   ├── scheduler.rs             # Tokio-based task scheduler
 │   │
 │   └── metrics/                 # Metric collectors module
@@ -97,7 +99,9 @@ rust-project/
 └── docs/
     ├── deployment.md           # Deployment guide
     ├── architecture.md         # This file
-    └── adding-new-metrics.md   # Guide for extending metrics
+    ├── adding-new-metrics.md   # Guide for extending metrics
+    ├── rust-intro-guide.md     # Rust beginner's guide
+    └── rust-cheatsheet.md      # Quick reference
 ```
 
 ### File Responsibilities
@@ -105,9 +109,10 @@ rust-project/
 | File | Purpose | Key Components |
 |------|---------|----------------|
 | `main.rs` | Application initialization, CLI parsing | `main()`, `init_logging()`, `parse_arguments()` |
-| `config.rs` | MongoDB connection and settings loading | `ConfigManager`, `MonitoringSettings` |
-| `storage.rs` | Metric persistence to MongoDB | `MetricStorage`, `store_metric()` |
-| `scheduler.rs` | Task scheduling with Tokio | `MetricScheduler`, `start()`, `run_metric_task()` |
+| `config.rs` | MongoDB connection, settings load/reload | `ConfigManager`, `MonitoringSettings` |
+| `storage.rs` | Metric persistence to MongoDB | `MetricStorage`, `store_metric_safe()` |
+| `aggregator.rs` | In-memory buffering, avg/min/max computation | `MetricBuffer`, `DockerMetricBuffer` |
+| `scheduler.rs` | Dual-timer task scheduling with Tokio | `MetricScheduler`, `run_standard_task()`, `run_docker_task()` |
 | `metrics/mod.rs` | Metric trait and collector factory | `MetricCollector` trait, `create_all_collectors()` |
 | `metrics/*.rs` | Individual metric implementations | Collector structs implementing `MetricCollector` |
 
@@ -131,50 +136,63 @@ pub trait MetricCollector: Send + Sync {
 - Type safety: Compiler ensures all metrics implement required methods
 - Polymorphism: Scheduler handles all metrics uniformly
 - Extensibility: Add new metrics without changing existing code
-- Testability: Easy to mock metrics for testing
 
-### 2. Async/Concurrent Execution
+### 2. Dual-Timer Aggregation Loop
 
-Uses Tokio runtime for concurrent metric collection:
+Each metric runs a `tokio::select!` loop with two independent timers:
 
 ```rust
-// Each metric runs in its own task
-tokio::spawn(async move {
-    let mut interval = interval(Duration::from_secs(timeout));
+loop {
+    // collect_timer fires every collect_timeout seconds
+    let mut collect_timer = interval(Duration::from_secs(settings.collect_timeout));
+    // flush_sleep fires after store_timeout seconds
+    let flush_sleep = tokio::time::sleep(Duration::from_secs(settings.store_timeout));
+    tokio::pin!(flush_sleep);
+
     loop {
-        interval.tick().await;
-        // Collect and store metric
+        select! {
+            _ = collect_timer.tick() => {
+                // Collect sample and push to buffer
+                buffer.push(&doc);
+            }
+            _ = &mut flush_sleep => { break; }  // Time to flush
+        }
     }
-});
-```
 
-**Benefits:**
-- Non-blocking: Metrics run concurrently
-- Efficient: Tasks are lightweight (green threads)
-- Independent: One metric failure doesn't affect others
-- Precise timing: Each metric runs at exact intervals
-
-### 3. MongoDB-Based Configuration
-
-Configuration is stored in MongoDB rather than config files:
-
-```javascript
-{
-  "key": "1111-1111",
-  "metric_settings": {
-    "LoadAverage": {
-      "timeout": 5,
-      "collection": "load_average_metrics"
-    }
-  }
+    // Write aggregated document to MongoDB
+    // Then reload settings from MongoDB
 }
 ```
 
 **Benefits:**
-- Centralized: All server configs in one database
-- Dynamic: Update without restarting (requires app enhancement)
-- Consistent: Same format across all servers
-- Queryable: Easy to audit and manage configurations
+- Decoupled: collection frequency and storage frequency are independent
+- Dynamic: timeouts reload from MongoDB after each flush
+- Efficient: ~60 raw samples are never written to the database
+
+### 3. In-Memory Aggregation
+
+`MetricBuffer` accumulates numeric fields across samples and produces one document per window:
+
+- **Aggregated fields** (`load_1min`, `available_mb`, etc.) → `{ "avg": …, "min": …, "max": … }`
+- **Passthrough fields** (`cpu_cores`, `total_mb`, `swap_total_mb`) → plain value (constant, no aggregation needed)
+- **Nested-array metrics** (DiskSpace, DockerStats) → last raw sample returned on flush
+
+`DockerMetricBuffer` matches containers by name across samples and aggregates `cpu_percent`, `memory_used_mb`, `memory_percent` per container. Cumulative counters (`network_rx_mb`, etc.) are taken as last-sample values.
+
+### 4. MongoDB-Based Configuration with Live Reload
+
+Configuration is stored in MongoDB:
+
+```javascript
+{
+  "key": "0001-0001",
+  "collect_timeout": 5,          // seconds between samples (most metrics)
+  "collect_docker_timeout": 20,  // seconds between Docker samples
+  "store_timeout": 60            // seconds between flushes to MongoDB
+}
+```
+
+After every successful flush, each task re-reads this document from MongoDB. If any timeout value changes, the new value takes effect on the next window — no restart required.
 
 ---
 
@@ -186,35 +204,23 @@ Configuration is stored in MongoDB rather than config files:
 - Parse command-line arguments
 - Initialize logging subsystem
 - Connect to MongoDB
-- Load configuration
+- Load initial configuration
 - Create and start scheduler
 
 **Key Functions:**
 
 ```rust
-// Entry point - coordinates application startup
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
     let args = parse_arguments()?;
     let config_manager = ConfigManager::new(&args.mongodb_uri, ...).await?;
     let settings = config_manager.load_settings(&args.config_key).await?;
-    let storage = MetricStorage::new(...);
-    let scheduler = MetricScheduler::new(...);
-    scheduler.start(collectors).await;
+    let storage = MetricStorage::new(config_manager.client(), ...);
+    let scheduler = MetricScheduler::new(config_manager, storage, args.config_key);
+    scheduler.start(collectors, settings).await;
 }
-
-// Sets up structured logging (JSON for systemd, pretty for terminal)
-fn init_logging() { ... }
-
-// Parses CLI args: --mongodb, --key, --database, --create-indexes
-fn parse_arguments() -> Result<AppConfig> { ... }
 ```
-
-**Error Handling:**
-- Uses `anyhow` for context-rich errors
-- Failures in startup are fatal (can't run without config)
-- All errors logged before exit
 
 ---
 
@@ -222,25 +228,19 @@ fn parse_arguments() -> Result<AppConfig> { ... }
 
 **Responsibilities:**
 - Establish MongoDB connection
-- Fetch monitoring settings for a specific node
-- Validate configuration structure
+- Fetch monitoring settings at startup (`load_settings`)
+- Re-fetch settings after every flush (`reload_settings`)
 
 **Key Types:**
 
 ```rust
-// Main configuration structure
 pub struct MonitoringSettings {
     pub key: String,
-    pub metric_settings: HashMap<String, MetricSettings>,
+    pub collect_timeout: u64,         // interval for LoadAverage, Memory, DiskSpace
+    pub collect_docker_timeout: u64,  // interval for DockerStats
+    pub store_timeout: u64,           // window length / flush interval
 }
 
-// Settings for individual metric
-pub struct MetricSettings {
-    pub timeout: u64,        // Collection interval in seconds
-    pub collection: String,   // MongoDB collection name
-}
-
-// Configuration manager
 pub struct ConfigManager {
     client: Client,
     database_name: String,
@@ -250,45 +250,80 @@ pub struct ConfigManager {
 **Key Methods:**
 
 ```rust
-// Connects to MongoDB and verifies connection
-async fn new(connection_string: &str, database_name: Option<&str>) -> Result<Self>
-
-// Loads settings document for given key from MonitoringSettings collection
+// Called once at startup
 async fn load_settings(&self, key: &str) -> Result<MonitoringSettings>
+
+// Called after every successful flush
+async fn reload_settings(&self, key: &str) -> Result<MonitoringSettings>
 ```
 
 **MongoDB Query:**
 ```javascript
-db.MonitoringSettings.findOne({ "key": "1111-1111" })
+db.MonitoringSettings.findOne({ "key": "0001-0001" })
 ```
+
+---
+
+### Aggregator Module (`aggregator.rs`)
+
+**Responsibilities:**
+- Buffer raw samples in memory during the collection window
+- Produce an aggregated BSON document on flush
+
+#### `MetricBuffer` (LoadAverage, Memory, DiskSpace)
+
+```rust
+pub struct MetricBuffer {
+    samples: Vec<HashMap<String, f64>>,  // per-tick numeric snapshots
+    last_raw: Option<Document>,           // fallback for nested-array metrics
+}
+```
+
+`push(&Document)`:
+- Extracts top-level numeric BSON fields, skips `node` and `timestamp`
+- Stores a clone of the raw document in `last_raw` (for DiskSpace fallback)
+
+`flush(&str) -> Option<Document>`:
+- ≥2 samples with numeric fields → aggregated document with avg/min/max per field
+- 0 numeric samples → returns `last_raw` with updated timestamp (DiskSpace path)
+- Never collected → returns `None`
+
+**Passthrough fields** (plain values, not aggregated):
+```rust
+const PASSTHROUGH_FIELDS: &[&str] = &["cpu_cores", "total_mb", "swap_total_mb"];
+```
+These preserve their original BSON types: `cpu_cores` → `Int32`, `total_mb` / `swap_total_mb` → `Int64`.
+
+#### `DockerMetricBuffer`
+
+```rust
+pub struct DockerMetricBuffer {
+    container_samples: HashMap<String, Vec<ContainerSample>>,  // keyed by container name
+    last_raw: Option<Document>,
+}
+```
+
+Aggregates per container across samples:
+- `cpu_percent`, `memory_used_mb`, `memory_percent` → `{ avg, min, max }`
+- `memory_limit_mb` → first sample value (constant per container)
+- `network_rx_mb`, `network_tx_mb`, `block_read_mb`, `block_write_mb` → last sample value (cumulative counters)
 
 ---
 
 ### Storage Module (`storage.rs`)
 
 **Responsibilities:**
-- Insert metric documents into MongoDB
-- Handle storage errors gracefully
-- Provide retry logic for transient failures
-- Create database indexes
+- Insert aggregated metric documents into MongoDB collections
+- Handle storage errors gracefully with one retry
 
-**Key Methods:**
+Collection names are hardcoded in `scheduler.rs` via `collection_for()`:
 
-```rust
-// Basic storage operation
-async fn store_metric(&self, collection_name: &str, document: Document) -> Result<()>
-
-// Storage with automatic retry (never fails, always logs)
-async fn store_metric_safe(&self, collection_name: &str, metric_name: &str, document: Document)
-
-// Creates indexes for query optimization
-async fn create_indexes(&self, collection_name: &str) -> Result<()>
-```
-
-**Error Handling Strategy:**
-- `store_metric()`: Returns error for caller to handle
-- `store_metric_safe()`: Retries once, logs errors, never returns error
-- Used by scheduler to ensure one metric failure doesn't stop others
+| Metric | Collection |
+|--------|-----------|
+| LoadAverage | `load_average_metrics` |
+| Memory | `memory_metrics` |
+| DiskSpace | `disk_metrics` |
+| DockerStats | `docker_metrics` |
 
 ---
 
@@ -296,83 +331,26 @@ async fn create_indexes(&self, collection_name: &str) -> Result<()>
 
 **Responsibilities:**
 - Spawn independent tasks for each metric
-- Manage task lifecycle
-- Coordinate metric collection and storage
-
-**Architecture Pattern:**
-Uses "Tokio Tasks with Different Intervals" pattern:
+- Run dual-timer collect/flush loops
+- Reload settings from MongoDB after each flush
 
 ```rust
-// Main scheduler structure
 pub struct MetricScheduler {
-    settings: Arc<MonitoringSettings>,
+    config_manager: Arc<ConfigManager>,
     storage: Arc<MetricStorage>,
     node_id: String,
 }
-
-// Spawns task for each metric
-async fn start(self, collectors: Vec<Box<dyn MetricCollector>>) {
-    for collector in collectors {
-        let settings = self.settings.get_metric_settings(collector.name());
-        tokio::spawn(async move {
-            run_metric_task(collector, storage, node_id, settings).await;
-        });
-    }
-}
-
-// Individual task loop
-async fn run_metric_task(...) {
-    let mut interval = interval(Duration::from_secs(interval_secs));
-    loop {
-        interval.tick().await;
-        let doc = collector.collect(&node_id).await?;
-        storage.store_metric_safe(collection_name, metric_name, doc).await;
-    }
-}
 ```
 
-**Task Independence:**
-- Each metric runs in its own Tokio task
-- Tasks share read-only data via `Arc<T>`
-- No communication between tasks (fully independent)
-- Failures isolated to individual tasks
+Two task variants:
+- `run_standard_task` — LoadAverage, Memory, DiskSpace: uses `MetricBuffer`, `collect_timeout`
+- `run_docker_task` — DockerStats: uses `DockerMetricBuffer`, `collect_docker_timeout`
 
----
-
-### Metrics Module (`metrics/mod.rs`)
-
-**Trait Definition:**
-
-```rust
-#[async_trait]
-pub trait MetricCollector: Send + Sync {
-    // Returns metric name (e.g., "LoadAverage")
-    fn name(&self) -> &str;
-
-    // Collects metric and returns BSON document
-    async fn collect(&self, node_id: &str) -> Result<Document, Box<dyn Error + Send + Sync>>;
-}
-```
-
-**Collector Factory:**
-
-```rust
-pub fn create_all_collectors() -> Vec<Box<dyn MetricCollector>> {
-    vec![
-        Box::new(load_average::LoadAverageCollector::new()),
-        Box::new(memory::MemoryCollector::new()),
-        Box::new(disk::DiskCollector::new()),
-        Box::new(docker::DockerCollector::new()),
-    ]
-}
-```
-
-**Adding New Metrics:**
-1. Create new file in `metrics/` directory
-2. Implement `MetricCollector` trait
-3. Add to `create_all_collectors()`
-4. Add configuration to MongoDB
-5. Done! No other code changes needed.
+Both variants follow the same outer loop:
+1. Create `collect_timer` and `flush_sleep` from current settings
+2. Inner `select!` loop: collect until flush deadline
+3. Flush buffer → store to MongoDB → reload settings
+4. Repeat with updated settings
 
 ---
 
@@ -381,64 +359,58 @@ pub fn create_all_collectors() -> Vec<Box<dyn MetricCollector>> {
 #### Load Average (`load_average.rs`)
 
 **Data Source:** `/proc/loadavg` (Linux), `sysctl` (macOS)
-**Dependencies:** `sysinfo` crate
-**Collection Time:** ~1ms
 
-**Document Structure:**
+**Raw document (per collect_timeout):**
 ```json
 {
-  "node": "1111-1111",          // unique identifier of the monitored server
-  "timestamp": "2024-01-15T10:30:00Z", // UTC time when the metric was collected
-  "load_1min": 1.5,             // average number of processes in run queue over last 1 minute
-  "load_5min": 1.2,             // average number of processes in run queue over last 5 minutes
-  "load_15min": 0.9,            // average number of processes in run queue over last 15 minutes
-  "cpu_cores": 8                // total logical CPU cores; used to normalize load (load/cores = utilization ratio)
+  "node": "0001-0001", "timestamp": "...",
+  "load_1min": 1.5, "load_5min": 1.2, "load_15min": 0.9, "cpu_cores": 8
+}
+```
+
+**Stored document (per store_timeout):**
+```json
+{
+  "node": "0001-0001", "timestamp": "...", "sample_count": 12,
+  "cpu_cores": 8,
+  "load_1min":  { "avg": 1.42, "min": 0.80, "max": 2.30 },
+  "load_5min":  { "avg": 1.18, "min": 0.90, "max": 1.50 },
+  "load_15min": { "avg": 0.95, "min": 0.85, "max": 1.10 }
 }
 ```
 
 #### Memory (`memory.rs`)
 
 **Data Source:** `/proc/meminfo` (Linux), `vm_stat` (macOS)
-**Dependencies:** `sysinfo` crate
-**Collection Time:** ~2ms
 
-**Document Structure:**
+**Raw document fields collected:** `total_mb`, `swap_total_mb`, `available_mb`, `used_percent`, `swap_used_percent`
+
+*(Fields removed: `used_mb`, `free_mb`, `swap_used_mb`, `swap_free_mb` — derivable from retained fields)*
+
+**Stored document (per store_timeout):**
 ```json
 {
-  "node": "1111-1111",          // unique identifier of the monitored server
-  "timestamp": "2024-01-15T10:30:00Z", // UTC time when the metric was collected
-  "total_mb": 16384,            // total physical RAM installed, in megabytes
-  "used_mb": 8192,              // RAM currently used by processes and kernel, in megabytes
-  "available_mb": 8192,         // RAM available for new processes (includes reclaimable cache), in megabytes
-  "free_mb": 4096,              // RAM completely unused (not including reclaimable cache), in megabytes
-  "used_percent": 50.0,         // percentage of total RAM that is used (used_mb / total_mb * 100)
-  "swap_total_mb": 8192,        // total swap space configured, in megabytes
-  "swap_used_mb": 1024,         // swap space currently in use, in megabytes
-  "swap_free_mb": 7168,         // swap space not in use, in megabytes
-  "swap_used_percent": 12.5     // percentage of swap used (swap_used_mb / swap_total_mb * 100)
+  "node": "0001-0001", "timestamp": "...", "sample_count": 12,
+  "total_mb": 24048, "swap_total_mb": 0,
+  "available_mb":      { "avg": 19200.0, "min": 18000.0, "max": 21000.0 },
+  "used_percent":      { "avg": 20.2,    "min": 12.8,    "max": 25.1    },
+  "swap_used_percent": { "avg": 0.0,     "min": 0.0,     "max": 0.0     }
 }
 ```
 
 #### Disk Space (`disk.rs`)
 
 **Data Source:** `statvfs()` system call
-**Dependencies:** `sysinfo` crate
-**Collection Time:** ~5ms per disk
 
-**Document Structure:**
+Disk documents contain a nested `disks` array. The aggregator finds no top-level numeric fields and falls back to storing the last raw sample of the window with an updated timestamp.
+
+**Stored document (per store_timeout, last-sample passthrough):**
 ```json
 {
-  "node": "1111-1111",          // unique identifier of the monitored server
-  "timestamp": "2024-01-15T10:30:00Z", // UTC time when the metric was collected
-  "disks": [                    // array of all mounted filesystems found on the node
-    {
-      "mount_point": "/",       // path where this filesystem is mounted; use "/" for overall disk usage
-      "filesystem": "ext4",     // filesystem type (ext4, xfs, tmpfs, etc.)
-      "total_gb": 500.0,        // total capacity of this filesystem, in gigabytes
-      "used_gb": 250.0,         // space currently occupied by files, in gigabytes
-      "available_gb": 250.0,    // space available for writing (may differ from total-used due to reserved blocks)
-      "used_percent": 50.0      // percentage of total space used (used_gb / total_gb * 100)
-    }
+  "node": "0001-0001", "timestamp": "...",
+  "disks": [
+    { "mount_point": "/", "filesystem": "ext4",
+      "total_gb": 500.0, "used_gb": 250.0, "available_gb": 250.0, "used_percent": 50.0 }
   ]
 }
 ```
@@ -446,30 +418,29 @@ pub fn create_all_collectors() -> Vec<Box<dyn MetricCollector>> {
 #### Docker Stats (`docker.rs`)
 
 **Data Source:** Docker Engine API
-**Dependencies:** `bollard` crate
-**Collection Time:** ~50-200ms depending on container count
+**Collect interval:** `collect_docker_timeout` (default 20s → 3 samples per window)
 
-**Document Structure:**
+**Stored document (per store_timeout):**
 ```json
 {
-  "node": "1111-1111",          // unique identifier of the monitored server
-  "timestamp": "2024-01-15T10:30:00Z", // UTC time when the metric was collected
-  "containers": [               // array of all running Docker containers on the node
+  "node": "0001-0001", "timestamp": "...", "sample_count": 3,
+  "containers": [
     {
-      "id": "abc123",           // short Docker container ID
-      "name": "my-app",         // container name as assigned in Docker (without leading slash)
-      "cpu_percent": 25.5,      // CPU usage as a percentage of one core (can exceed 100% on multi-core)
-      "memory_used_mb": 512.0,  // RAM currently consumed by the container, in megabytes
-      "memory_limit_mb": 2048.0, // maximum RAM the container is allowed to use (from Docker resource limits)
-      "memory_percent": 25.0,   // percentage of memory limit used (memory_used_mb / memory_limit_mb * 100)
-      "network_rx_mb": 10.5,    // total data received over the network since container start, in megabytes
-      "network_tx_mb": 5.2,     // total data sent over the network since container start, in megabytes
-      "block_read_mb": 100.0,   // total data read from block devices (disk) since container start, in megabytes
-      "block_write_mb": 50.0    // total data written to block devices (disk) since container start, in megabytes
+      "id": "531c5b818fe7", "name": "krys-kafka-ui-prod",
+      "memory_limit_mb": 24048.26,
+      "cpu_percent":    { "avg": 0.38, "min": 0.21, "max": 0.54 },
+      "memory_used_mb": { "avg": 710.1, "min": 705.2, "max": 714.8 },
+      "memory_percent": { "avg": 2.95,  "min": 2.93,  "max": 2.97  },
+      "network_rx_mb": 56.87,
+      "network_tx_mb": 50.69,
+      "block_read_mb":  86.54,
+      "block_write_mb":  0.10
     }
   ]
 }
 ```
+
+> `network_rx_mb`, `network_tx_mb`, `block_read_mb`, `block_write_mb` are **cumulative totals since container start** — they only ever increase. The last sample in the window is stored.
 
 ---
 
@@ -480,49 +451,34 @@ pub fn create_all_collectors() -> Vec<Box<dyn MetricCollector>> {
 ```
 1. main()
    │
-   ├─> init_logging()                    [Set up tracing]
-   │
-   ├─> parse_arguments()                 [Parse CLI args]
-   │
+   ├─> init_logging()
+   ├─> parse_arguments()
    ├─> ConfigManager::new()              [Connect to MongoDB]
-   │   └─> Client::with_uri_str()
-   │   └─> Verify connection
-   │
-   ├─> load_settings()                   [Fetch config from MongoDB]
-   │   └─> collection.find_one({ key })
-   │
-   ├─> MetricStorage::new()              [Create storage manager]
-   │
-   ├─> create_all_collectors()           [Create metric collectors]
-   │   ├─> LoadAverageCollector::new()
-   │   ├─> MemoryCollector::new()
-   │   ├─> DiskCollector::new()
-   │   └─> DockerCollector::new()
-   │
-   ├─> MetricScheduler::new()            [Create scheduler]
-   │
-   └─> scheduler.start()                 [Start collection tasks]
+   ├─> config_manager.load_settings()   [Read MonitoringSettings document]
+   ├─> MetricStorage::new()
+   ├─> create_all_collectors()
+   ├─> MetricScheduler::new(config_manager, storage, node_id)
+   └─> scheduler.start(collectors, settings)
        └─> (runs forever)
 ```
 
-### Metric Collection Flow (Per Metric)
+### Metric Collection Flow (Per Metric Task)
 
 ```
-Tokio Task (runs forever)
+Outer loop (runs forever, settings may change each iteration):
    │
-   ├─> interval.tick().await             [Wait for next interval]
+   ├─> Create collect_timer(collect_timeout) and flush_sleep(store_timeout)
    │
-   ├─> collector.collect(node_id)        [Collect metric data]
-   │   ├─> Read system information
-   │   ├─> Format as BSON document
-   │   └─> Return document
+   │   Inner select! loop:
+   │   ├─> collect_timer.tick() → collector.collect() → buffer.push()
+   │   ├─> collect_timer.tick() → collector.collect() → buffer.push()
+   │   ├─> ... (repeats until flush_sleep fires)
+   │   └─> flush_sleep fires → break inner loop
    │
-   ├─> storage.store_metric_safe()       [Store in MongoDB]
-   │   ├─> collection.insert_one()
-   │   ├─> Log success/failure
-   │   └─> Retry once on failure
-   │
-   └─> [Loop back to tick().await]
+   ├─> buffer.flush() → aggregated BSON document
+   ├─> storage.store_metric_safe(collection, document)
+   ├─> config_manager.reload_settings()  [re-read MongoDB after each store]
+   └─> update settings locals, loop back
 ```
 
 ### Error Handling Flow
@@ -532,13 +488,17 @@ Error Occurs
    │
    ├─> Collection Error
    │   ├─> Log error with context
-   │   ├─> For Docker: Log helpful hint
-   │   └─> Continue (task keeps running)
+   │   ├─> For Docker: Log hint about Docker daemon
+   │   └─> Continue — task keeps running, sample is skipped
    │
    ├─> Storage Error
    │   ├─> Log error
-   │   ├─> Retry once (with delay)
+   │   ├─> Retry once (with 100ms delay)
    │   └─> If still fails: log and continue
+   │
+   ├─> Settings Reload Error
+   │   ├─> Log warning
+   │   └─> Keep using current settings — no crash
    │
    └─> Fatal Error (startup)
        ├─> Log error with full context
@@ -549,76 +509,54 @@ Error Occurs
 
 ## Design Patterns
 
-### 1. Trait Object Pattern
-
-**Purpose:** Enable runtime polymorphism for metric collectors
+### 1. Dual-Timer Pattern with `tokio::select!` and `tokio::pin!`
 
 ```rust
-// Trait objects allow heterogeneous collections
-let collectors: Vec<Box<dyn MetricCollector>> = create_all_collectors();
+let flush_sleep = tokio::time::sleep(Duration::from_secs(store_timeout));
+tokio::pin!(flush_sleep);  // Required: Sleep is !Unpin
 
-// Scheduler handles all metrics uniformly
-for collector in collectors {
-    scheduler.add(collector);  // Works for any MetricCollector
+loop {
+    select! {
+        _ = collect_timer.tick() => { /* collect */ }
+        _ = &mut flush_sleep    => { break; }
+    }
 }
 ```
 
-### 2. Factory Pattern
+`tokio::pin!` is required because `Sleep` is `!Unpin` and cannot be polled by value in a loop.
 
-**Purpose:** Centralize creation of all metric collectors
+### 2. Trait Object Pattern
 
 ```rust
-// Single function to create all collectors
-pub fn create_all_collectors() -> Vec<Box<dyn MetricCollector>> {
-    vec![
-        Box::new(LoadAverageCollector::new()),
-        Box::new(MemoryCollector::new()),
-        // Add new metrics here
-    ]
-}
+// Box<dyn MetricCollector> enables heterogeneous collections
+let collectors: Vec<Box<dyn MetricCollector>> = create_all_collectors();
+// Scheduler handles all types uniformly via the trait
 ```
 
 ### 3. Shared State Pattern (Arc)
 
-**Purpose:** Share read-only data between async tasks
-
 ```rust
-// Settings and storage shared across all tasks
-let settings = Arc::new(settings);
+let config_manager = Arc::new(config_manager);
 let storage = Arc::new(storage);
 
-// Each task gets a clone of the Arc (cheap, atomic reference counting)
 for collector in collectors {
-    let settings = Arc::clone(&settings);
-    let storage = Arc::clone(&storage);
-    tokio::spawn(async move { ... });
+    let config_mgr = Arc::clone(&config_manager);
+    let storage    = Arc::clone(&storage);
+    tokio::spawn(async move { run_standard_task(..., config_mgr, storage, ...).await });
 }
 ```
 
-### 4. Error Recovery Pattern
+### 4. Buffer + Flush Pattern
 
-**Purpose:** Graceful degradation on failures
-
-```rust
-// Collection failures don't stop the task
-match collector.collect(&node_id).await {
-    Ok(doc) => storage.store_metric_safe(...).await,
-    Err(e) => {
-        error!("Collection failed: {}", e);
-        // Task continues running
-    }
-}
-```
+Raw samples accumulate in memory; only the aggregated summary is written to MongoDB. This reduces database write volume from `(60s / collect_timeout)` inserts per minute down to 1.
 
 ---
 
 ## Technology Stack
 
-### Core Dependencies
-
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `tokio` | 1.35 | Async runtime, task scheduling |
+| `tokio` | 1.35 | Async runtime, task scheduling, timers |
 | `mongodb` | 2.8 | MongoDB driver |
 | `sysinfo` | 0.30 | System information (CPU, memory, disk) |
 | `bollard` | 0.16 | Docker API client |
@@ -629,24 +567,6 @@ match collector.collect(&node_id).await {
 | `anyhow` | 1.0 | Error handling with context |
 | `async-trait` | 0.1 | Async methods in traits |
 
-### Why These Choices?
-
-**Tokio vs. async-std:**
-- Tokio: Industry standard, mature ecosystem, better performance
-- Used in production by Discord, AWS, Microsoft
-
-**MongoDB vs. PostgreSQL:**
-- MongoDB: Better for time-series data, flexible schema
-- No need for migrations when adding new metrics
-
-**sysinfo vs. procfs:**
-- sysinfo: Cross-platform abstraction
-- Single API for Linux, macOS, Windows
-
-**bollard vs. docker_api:**
-- bollard: More complete, actively maintained
-- Better async support
-
 ---
 
 ## Performance Considerations
@@ -655,53 +575,23 @@ match collector.collect(&node_id).await {
 
 **Typical memory footprint:** 10-20 MB
 
-- Rust's zero-cost abstractions minimize overhead
-- `Arc` for shared data (no copying)
-- Each metric document is small (~500 bytes)
-- No buffering of metrics (immediate storage)
+- Each metric buffer holds at most `store_timeout / collect_timeout` samples (default: 12 for standard metrics, 3 for Docker)
+- Samples are small `HashMap<String, f64>` entries, not full BSON documents
+- Buffer is cleared on each flush
 
-**Resource limits in systemd:**
-```ini
-MemoryLimit=512M    # Generous limit for safety
-CPUQuota=50%        # Limit to half of one core
-```
+### Write Volume
+
+Before aggregation: 1 insert per metric per `collect_timeout` seconds = ~720 inserts/hour for load average alone.
+
+After aggregation: 1 insert per metric per `store_timeout` seconds = 60 inserts/hour for all four metrics combined.
 
 ### CPU Usage
 
 **Typical CPU usage:** < 1% on modern hardware
 
 - Async/await prevents blocking
-- Metric collection is I/O bound, not CPU bound
-- Most time spent waiting (sleep between intervals)
-
-**Optimization techniques:**
-- No busy-waiting (interval.tick() sleeps efficiently)
-- Minimal string allocations
-- BSON serialization is fast (native format)
-
-### Network I/O
-
-**MongoDB traffic:**
-- Small inserts: ~1 KB per metric
-- Load average (5s interval): ~720 KB/hour
-- All metrics combined: ~5 MB/hour
-
-**Optimization:**
-- Could batch inserts (not implemented)
-- Compression in MongoDB wire protocol
-- Connection pooling in MongoDB driver
-
-### Scaling
-
-**Single server limits:**
-- Tested up to 100+ metrics with 1s intervals
-- Bottleneck: MongoDB insert performance
-- Recommendation: Use 5s+ intervals for production
-
-**Multiple servers:**
-- Each server is independent
-- MongoDB handles concurrent writes well
-- Index on `node` field for efficient queries
+- `select!` uses efficient OS-level waiting
+- No busy-waiting
 
 ---
 
@@ -710,30 +600,20 @@ CPUQuota=50%        # Limit to half of one core
 ### Process Security
 
 - Runs as dedicated non-root user
-- No shell access (User has `/bin/false` shell)
 - SystemD hardening options enabled
-- Resource limits prevent DOS
+- Resource limits prevent runaway memory usage
 
 ### MongoDB Security
 
 - Supports authenticated connections
-- Connection string can include credentials
-- Credentials not logged (masked in output)
-- Uses TLS if connection string specifies
-
-### File System Security
-
-- Binary owned by dedicated user
-- Read-only access to most of system
-- `ProtectSystem=strict` in systemd
-- `ProtectHome=true` prevents home directory access
+- Credentials are masked in all log output
+- Settings are reloaded from MongoDB after each flush — malformed documents are logged and current settings are retained (no crash)
 
 ### Docker Socket Access
 
 - Requires membership in `docker` group
-- Read-only access to Docker API
-- No ability to modify containers
-- Only stats queries executed
+- Read-only queries only (stats)
+- If Docker is unavailable, the DockerStats task logs a warning and continues
 
 ---
 
@@ -741,55 +621,16 @@ CPUQuota=50%        # Limit to half of one core
 
 ### Adding New Metrics
 
-The architecture is designed for easy extension. See `docs/adding-new-metrics.md` for detailed guide.
+See `docs/adding-new-metrics.md` for a complete guide.
 
-**Summary of steps:**
+**Summary:**
 1. Create new file in `src/metrics/`
 2. Implement `MetricCollector` trait
-3. Add to `create_all_collectors()`
-4. Add configuration to MongoDB
-5. Deploy and restart
+3. Add to `create_all_collectors()` in `src/metrics/mod.rs`
+4. Add collection name mapping in `collection_for()` in `src/scheduler.rs`
+5. If the metric has constant fields, add them to `PASSTHROUGH_FIELDS` in `src/aggregator.rs`
+6. Build and deploy
 
-**Example metric ideas:**
-- Network I/O statistics
-- Process monitoring (specific PIDs)
-- Temperature sensors
-- Custom application metrics
-- Log file parsing
-- External API monitoring
-
-### Configuration Extensions
-
-Current configuration can be extended with:
-- Alert thresholds
-- Data retention policies
-- Conditional collection (only collect if...)
-- Multiple MongoDB destinations
-- Metric transformations
-
-### Future Enhancements
-
-**Potential improvements:**
-- Dynamic configuration reload (no restart needed)
-- Metric batching for better performance
-- Compression before storage
-- Local caching when MongoDB unavailable
-- REST API for health checks
-- Prometheus exporter
-- Web dashboard
-
----
-
-## Conclusion
-
-The Metrics Collector is designed with these principles:
-
-1. **Simplicity**: Easy to understand and maintain
-2. **Reliability**: Handles failures gracefully
-3. **Extensibility**: Adding metrics is straightforward
-4. **Performance**: Efficient async/concurrent design
-5. **Security**: Minimal privileges, sandboxed execution
-6. **Production-Ready**: Proper logging, monitoring, deployment
+No MongoDB configuration changes needed — collection name and timing are resolved from the three shared timeout settings.
 
 For deployment instructions, see `docs/deployment.md`.
-For adding new metrics, see `docs/adding-new-metrics.md`.
