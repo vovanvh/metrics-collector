@@ -21,12 +21,27 @@ use crate::storage::MetricStorage;
 /// Maps a metric name to its hardcoded MongoDB collection name.
 fn collection_for(metric_name: &str) -> &'static str {
     match metric_name {
-        "LoadAverage" => "load_average_metrics",
-        "Memory"      => "memory_metrics",
-        "DiskSpace"   => "disk_metrics",
-        "DockerStats" => "docker_metrics",
-        _             => "unknown_metrics",
+        "LoadAverage"        => "load_average_metrics",
+        "Memory"             => "memory_metrics",
+        "DiskSpace"          => "disk_metrics",
+        "DockerStats"        => "docker_metrics",
+        "ProcessCPUSnapshot" => "process_cpu_logs",
+        "ProcessRAMSnapshot" => "process_ram_logs",
+        "DockerEvents"       => "docker_event_logs",
+        "DockerLogs"         => "docker_container_logs",
+        "SystemEvents"       => "system_event_logs",
+        _                    => "unknown_metrics",
     }
+}
+
+/// Metrics that are unaggregatable log/event snapshots — no numeric fields to
+/// average, so each collected document is written as-is instead of being
+/// buffered and flushed once per `store_timeout` window.
+fn is_log_metric(metric_name: &str) -> bool {
+    matches!(
+        metric_name,
+        "ProcessCPUSnapshot" | "ProcessRAMSnapshot" | "DockerEvents" | "DockerLogs" | "SystemEvents"
+    )
 }
 
 pub struct MetricScheduler {
@@ -72,6 +87,10 @@ impl MetricScheduler {
             let handle = if metric_name == "DockerStats" {
                 tokio::spawn(async move {
                     run_docker_task(collector, storage, config_mgr, node_id, settings).await;
+                })
+            } else if is_log_metric(&metric_name) {
+                tokio::spawn(async move {
+                    run_log_task(collector, storage, config_mgr, node_id, settings).await;
                 })
             } else {
                 tokio::spawn(async move {
@@ -166,6 +185,49 @@ async fn run_standard_task(
                 }
             }
             None => warn!("Not enough samples for '{}', skipping flush", metric_name),
+        }
+    }
+}
+
+/// Collection loop for log/event snapshots (ProcessCPUSnapshot, ProcessRAMSnapshot,
+/// DockerEvents, DockerLogs, SystemEvents).
+///
+/// Unlike `run_standard_task`, there is no buffering or aggregation — these documents
+/// have no numeric fields to average, so each collected tick is written to MongoDB
+/// as its own document. Settings are still reloaded on the `store_timeout` cadence
+/// to pick up `collect_timeout` changes without needing a restart.
+async fn run_log_task(
+    collector: Box<dyn MetricCollector>,
+    storage: Arc<MetricStorage>,
+    config_manager: Arc<ConfigManager>,
+    node_id: String,
+    mut settings: MonitoringSettings,
+) {
+    let metric_name = collector.name();
+    let collection  = collection_for(metric_name);
+
+    info!("Starting log collection loop for '{}'", metric_name);
+
+    loop {
+        let mut collect_timer = interval(Duration::from_secs(settings.collect_timeout));
+        let reload_sleep = tokio::time::sleep(Duration::from_secs(settings.store_timeout));
+        tokio::pin!(reload_sleep);
+
+        loop {
+            select! {
+                _ = collect_timer.tick() => {
+                    match collector.collect(&node_id).await {
+                        Ok(doc) => storage.store_metric_safe(collection, metric_name, doc).await,
+                        Err(e)  => error!("Failed to collect '{}': {}", metric_name, e),
+                    }
+                }
+                _ = &mut reload_sleep => { break; }
+            }
+        }
+
+        match config_manager.reload_settings(&node_id).await {
+            Ok(new) => settings = new,
+            Err(e)  => warn!("Failed to reload settings for '{}': {}", metric_name, e),
         }
     }
 }

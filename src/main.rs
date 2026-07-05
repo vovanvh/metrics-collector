@@ -61,6 +61,11 @@ async fn main() -> Result<()> {
             "memory_metrics",
             "disk_metrics",
             "docker_metrics",
+            "process_cpu_logs",
+            "process_ram_logs",
+            "docker_event_logs",
+            "docker_container_logs",
+            "system_event_logs",
         ];
         for collection in &collections {
             info!("Creating indexes for collection: {}", collection);
