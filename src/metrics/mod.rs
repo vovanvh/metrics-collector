@@ -12,7 +12,8 @@ pub mod load_average;
 pub mod memory;
 pub mod disk;
 pub mod docker;
-pub mod processes;
+pub mod processes_cpu;
+pub mod processes_ram;
 pub mod docker_events;
 pub mod docker_logs;
 pub mod system_events;
@@ -87,8 +88,11 @@ pub fn create_all_collectors() -> Vec<Box<dyn MetricCollector>> {
         // Docker container stats (CPU, memory, network I/O per container)
         Box::new(docker::DockerCollector::new()),
 
-        // Top 20 host processes by CPU (non-Docker, kernel, system services)
-        Box::new(processes::ProcessSnapshotCollector::new()),
+        // Top host processes by CPU, filtered to >1% usage (non-Docker, kernel, system services)
+        Box::new(processes_cpu::ProcessCPUSnapshotCollector::new()),
+
+        // Top host processes by RAM, filtered to >1% of total system memory
+        Box::new(processes_ram::ProcessRAMSnapshotCollector::new()),
 
         // Docker lifecycle events (start, stop, die, OOM-kill, restart)
         Box::new(docker_events::DockerEventsCollector::new()),
