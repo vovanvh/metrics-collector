@@ -44,6 +44,17 @@ fn is_log_metric(metric_name: &str) -> bool {
     )
 }
 
+/// Returns the collection interval (seconds) that applies to a given metric.
+/// Anything that talks to the Docker daemon (stats, events, container logs)
+/// shares `collect_docker_timeout` so they don't hit it at different rates;
+/// everything else uses the general `collect_timeout`.
+fn collect_timeout_for(metric_name: &str, settings: &MonitoringSettings) -> u64 {
+    match metric_name {
+        "DockerStats" | "DockerEvents" | "DockerLogs" => settings.collect_docker_timeout,
+        _ => settings.collect_timeout,
+    }
+}
+
 pub struct MetricScheduler {
     config_manager: Arc<ConfigManager>,
     storage: Arc<MetricStorage>,
@@ -80,7 +91,7 @@ impl MetricScheduler {
                 "Scheduling '{}' → collection '{}' (collect: {}s, store: {}s)",
                 metric_name,
                 collection_for(&metric_name),
-                if metric_name == "DockerStats" { settings.collect_docker_timeout } else { settings.collect_timeout },
+                collect_timeout_for(&metric_name, &settings),
                 settings.store_timeout,
             );
 
@@ -209,7 +220,7 @@ async fn run_log_task(
     info!("Starting log collection loop for '{}'", metric_name);
 
     loop {
-        let mut collect_timer = interval(Duration::from_secs(settings.collect_timeout));
+        let mut collect_timer = interval(Duration::from_secs(collect_timeout_for(metric_name, &settings)));
         let reload_sleep = tokio::time::sleep(Duration::from_secs(settings.store_timeout));
         tokio::pin!(reload_sleep);
 

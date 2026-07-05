@@ -258,7 +258,7 @@ Top 10 processes above 1% CPU. No aggregation — one document per tick, not per
 ```
 Top 10 processes above 1% of total system RAM. Same shape as `process_cpu_logs`, sorted by memory instead.
 
-### docker_event_logs (one per collect_timeout tick)
+### docker_event_logs (one per collect_docker_timeout tick)
 ```json
 {
   "node": "0001-0001",
@@ -269,7 +269,7 @@ Top 10 processes above 1% of total system RAM. Same shape as `process_cpu_logs`,
 }
 ```
 
-### docker_container_logs (one per collect_timeout tick)
+### docker_container_logs (one per collect_docker_timeout tick)
 ```json
 {
   "node": "0001-0001",
