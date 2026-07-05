@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use bson::{doc, Bson, Document};
 use chrono::Utc;
-use crate::analysis::{detect_spike, detect_trend};
 
 // These fields are stored as plain values rather than {avg, min, max}
 // because they are constant within a collection window.
@@ -95,14 +94,11 @@ impl MetricBuffer {
                     // Constant field — store first sample value with original BSON type
                     result.insert(field, bson_for_passthrough(field, values[0]));
                 } else {
-                    let avg   = values.iter().sum::<f64>() / values.len() as f64;
-                    let min   = values.iter().cloned().fold(f64::INFINITY, f64::min);
-                    let max   = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let spike = detect_spike(&values);
-                    let trend = detect_trend(&values);
+                    let avg = values.iter().sum::<f64>() / values.len() as f64;
+                    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     result.insert(field, doc! {
                         "avg": avg, "min": min, "max": max,
-                        "spike": spike, "trend": trend,
                     });
                 }
             }
@@ -215,7 +211,6 @@ impl DockerMetricBuffer {
         let mut container_docs: Vec<Bson> = self.container_samples
             .iter()
             .map(|(name, samples)| {
-                // Collect per-field sample vecs for stats + spike/trend analysis
                 let cpu_vals:      Vec<f64> = samples.iter().map(|s| s.cpu_percent).collect();
                 let mem_used_vals: Vec<f64> = samples.iter().map(|s| s.memory_used_mb).collect();
                 let mem_pct_vals:  Vec<f64> = samples.iter().map(|s| s.memory_percent).collect();
@@ -237,15 +232,12 @@ impl DockerMetricBuffer {
                     "memory_limit_mb":  memory_limit_mb,
                     "cpu_percent": {
                         "avg": cpu_avg, "min": cpu_min, "max": cpu_max,
-                        "spike": detect_spike(&cpu_vals), "trend": detect_trend(&cpu_vals),
                     },
                     "memory_used_mb": {
                         "avg": mem_used_avg, "min": mem_used_min, "max": mem_used_max,
-                        "spike": detect_spike(&mem_used_vals), "trend": detect_trend(&mem_used_vals),
                     },
                     "memory_percent": {
                         "avg": mem_pct_avg, "min": mem_pct_min, "max": mem_pct_max,
-                        "spike": detect_spike(&mem_pct_vals), "trend": detect_trend(&mem_pct_vals),
                     },
                     "network_rx_mb":  last.network_rx_mb,
                     "network_tx_mb":  last.network_tx_mb,

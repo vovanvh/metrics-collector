@@ -12,7 +12,6 @@ use tracing::{error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod aggregator;
-mod analysis;
 mod config;
 mod metrics;
 mod scheduler;
