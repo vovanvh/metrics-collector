@@ -10,10 +10,17 @@ A production-ready, extensible server monitoring tool written in Rust that colle
   - Disk Space (all mounted filesystems, last-sample per window)
   - Docker Container Stats (CPU and memory aggregated, I/O last-sample)
 
-- **60-Second Aggregation Windows**
+- **60-Second Aggregation Windows** (metrics only)
   - Buffers raw samples in memory; writes one document per minute per metric
   - Each numeric field stored as `{ "avg": …, "min": …, "max": … }`
   - Constant fields (cpu_cores, total_mb, etc.) stored as plain values
+
+- **Log & Event Snapshots** (unaggregated, short-retention)
+  - Host process snapshots by CPU and by RAM usage (top 10, filtered to >1% each)
+  - Docker container lifecycle events (start, stop, die, OOM-kill, restart)
+  - Docker container stdout/stderr log lines, batched per interval
+  - Kernel/systemd error events via `journalctl` (Linux only)
+  - No averaging — each collected tick is written as its own document, since there's no numeric field to aggregate
 
 - **Live Configuration Reload**
   - Settings re-read from MongoDB after every flush — no restart needed
@@ -102,7 +109,12 @@ metrics-collector/
 │       ├── load_average.rs     # Load average metric
 │       ├── memory.rs           # Memory usage metric
 │       ├── disk.rs             # Disk space metric
-│       └── docker.rs           # Docker stats metric
+│       ├── docker.rs           # Docker stats metric
+│       ├── processes_cpu.rs    # Top host processes by CPU (log, unaggregated)
+│       ├── processes_ram.rs    # Top host processes by RAM (log, unaggregated)
+│       ├── docker_events.rs    # Docker lifecycle events (log, unaggregated)
+│       ├── docker_logs.rs      # Docker container stdout/stderr (log, unaggregated)
+│       └── system_events.rs    # Kernel/systemd error events (log, unaggregated)
 │
 └── docs/
     ├── deployment.md
@@ -222,6 +234,69 @@ RUST_LOG=debug metrics-collector --mongodb "..." --key "..."
 
 > `network_rx_mb`, `network_tx_mb`, `block_read_mb`, `block_write_mb` are **cumulative totals since container start**, not per-window rates. The last sample value is stored.
 
+### process_cpu_logs (one per collect_timeout tick)
+```json
+{
+  "node": "0001-0001",
+  "timestamp": "2026-04-08T12:00:05Z",
+  "processes": [
+    { "pid": 4821, "name": "java", "cpu_percent": 187.3, "memory_mb": 2048.5, "memory_percent": 8.5, "status": "Run" }
+  ]
+}
+```
+Top 10 processes above 1% CPU. No aggregation — one document per tick, not per minute.
+
+### process_ram_logs (one per collect_timeout tick)
+```json
+{
+  "node": "0001-0001",
+  "timestamp": "2026-04-08T12:00:05Z",
+  "processes": [
+    { "pid": 4821, "name": "java", "memory_mb": 2048.5, "memory_percent": 8.5, "cpu_percent": 187.3, "status": "Run" }
+  ]
+}
+```
+Top 10 processes above 1% of total system RAM. Same shape as `process_cpu_logs`, sorted by memory instead.
+
+### docker_event_logs (one per collect_timeout tick)
+```json
+{
+  "node": "0001-0001",
+  "timestamp": "2026-04-08T12:00:05Z",
+  "events": [
+    { "event_time": "2026-04-08T12:00:03Z", "container_id": "531c5b818fe7", "container_name": "my-app", "action": "die", "exit_code": 137 }
+  ]
+}
+```
+
+### docker_container_logs (one per collect_timeout tick)
+```json
+{
+  "node": "0001-0001",
+  "timestamp": "2026-04-08T12:00:05Z",
+  "containers": [
+    {
+      "container_id": "531c5b818fe7",
+      "container_name": "my-app",
+      "log_lines": [ { "stream": "stderr", "time": "2026-04-08T12:00:04Z", "message": "OutOfMemoryError: Java heap space" } ],
+      "truncated": false
+    }
+  ]
+}
+```
+
+### system_event_logs (one per collect_timeout tick, Linux only)
+```json
+{
+  "node": "0001-0001",
+  "timestamp": "2026-04-08T12:00:05Z",
+  "events": [
+    { "event_time": "2026-04-08T12:00:03Z", "priority": "err", "unit": "docker.service", "message": "...", "hostname": "node-01" }
+  ]
+}
+```
+Parsed from `journalctl --output=json`. Empty `events` array on non-Linux platforms.
+
 ## Configuration
 
 ### Settings Document
@@ -272,7 +347,8 @@ db.load_average_metrics.find({ "node": "0001-0001", "load_1min.avg": { $gt: 4 } 
 1. Create a file in `src/metrics/` and implement `MetricCollector`
 2. Add to `create_all_collectors()` in `src/metrics/mod.rs`
 3. Add collection name to `collection_for()` in `src/scheduler.rs`
-4. Rebuild and deploy
+4. If the document has no top-level numeric fields to average (an events/log-style collector), add its name to `is_log_metric()` in `src/scheduler.rs` so it's written on every tick instead of being buffered and flushed once a minute
+5. Rebuild and deploy
 
 No MongoDB document changes needed. See [Adding New Metrics Guide](docs/adding-new-metrics.md).
 
