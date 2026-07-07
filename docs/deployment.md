@@ -10,9 +10,10 @@ This guide provides detailed instructions for deploying the Metrics Collector on
 4. [Installation](#installation)
 5. [SystemD Service Setup (Linux)](#systemd-service-setup-linux)
 6. [launchd Service Setup (macOS)](#launchd-service-setup-macos)
-7. [Verification](#verification)
-8. [Troubleshooting](#troubleshooting)
-9. [Uninstallation](#uninstallation)
+7. [Windows Service Setup](#windows-service-setup)
+8. [Verification](#verification)
+9. [Troubleshooting](#troubleshooting)
+10. [Uninstallation](#uninstallation)
 
 ---
 
@@ -20,11 +21,11 @@ This guide provides detailed instructions for deploying the Metrics Collector on
 
 ### Required Software
 
-- **Operating System**: Linux (Ubuntu 20.04+, CentOS 8+, or similar) or macOS (12+)
+- **Operating System**: Linux (Ubuntu 20.04+, CentOS 8+, or similar), macOS (12+), or Windows (10/Server 2016+)
 - **Rust**: Version 1.70 or higher (for building)
 - **MongoDB**: Version 4.4 or higher (accessible from your server)
 - **Docker** (optional): If you want to monitor Docker containers
-- **Service manager**: SystemD on Linux (standard on modern distros), launchd on macOS (built in)
+- **Service manager**: SystemD on Linux (standard on modern distros), launchd on macOS (built in), [NSSM](https://nssm.cc/) on Windows (the binary itself doesn't implement the Windows Service Control API, so `sc.exe create` alone won't work — see [Windows Service Setup](#windows-service-setup))
 
 ### Required Permissions
 
@@ -419,6 +420,110 @@ To start only when a specific user logs in rather than at system boot:
 
 ---
 
+## Windows Service Setup
+
+`metrics-collector` is a plain console binary — it doesn't implement the Windows Service Control API (`StartServiceCtrlDispatcher`), so registering it directly with `sc.exe create` will fail (error 1053, "the service did not respond in a timely fashion"). The standard fix is a lightweight wrapper that speaks the Service Control API on the binary's behalf and just launches/monitors the real executable: **[NSSM](https://nssm.cc/)** (the Non-Sucking Service Manager).
+
+> Prefer not to install a third-party tool? See [Alternative: Task Scheduler](#alternative-task-scheduler-no-third-party-tool) below — simpler, but not a true service (won't show up in `services.msc`).
+
+### 1. Build the Binary
+
+**Natively on Windows:**
+```powershell
+cargo build --release
+# Binary at: target\release\metrics-collector.exe
+```
+
+**Cross-compiled from Linux/macOS:**
+```bash
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu
+# Binary at: target/x86_64-pc-windows-gnu/release/metrics-collector.exe
+
+# Copy to the Windows machine (e.g. via scp, or any file share)
+scp target/x86_64-pc-windows-gnu/release/metrics-collector.exe user@windows-host:/path/
+```
+
+### 2. Install the Binary
+
+```powershell
+New-Item -ItemType Directory -Force -Path "C:\Program Files\metrics-collector"
+Copy-Item target\release\metrics-collector.exe "C:\Program Files\metrics-collector\"
+```
+
+### 3. Install NSSM
+
+```powershell
+# Via winget
+winget install NSSM.NSSM
+
+# Or download the binary directly from https://nssm.cc/download and put nssm.exe on your PATH
+```
+
+### 4. Register the Service
+
+Run as Administrator:
+
+```powershell
+nssm install metrics-collector "C:\Program Files\metrics-collector\metrics-collector.exe"
+nssm set metrics-collector AppParameters '--mongodb "mongodb://YOUR_MONGODB_HOST:27017" --key "YOUR_NODE_KEY" --database "monitoring"'
+nssm set metrics-collector AppDirectory "C:\Program Files\metrics-collector"
+
+# Start on boot, restart automatically if it crashes
+nssm set metrics-collector Start SERVICE_AUTO_START
+nssm set metrics-collector AppExit Default Restart
+nssm set metrics-collector AppRestartDelay 5000
+
+# Redirect stdout/stderr to log files (NSSM handles rotation via AppRotateFiles if desired)
+nssm set metrics-collector AppStdout "C:\Program Files\metrics-collector\metrics-collector.log"
+nssm set metrics-collector AppStderr "C:\Program Files\metrics-collector\metrics-collector.error.log"
+```
+
+For MongoDB with authentication, put the credentials in the `AppParameters` connection string as usual: `mongodb://username:password@host:27017/monitoring?authSource=admin`.
+
+### 5. Start and Verify
+
+```powershell
+nssm start metrics-collector
+
+# Check status
+Get-Service metrics-collector
+nssm status metrics-collector
+
+# Tail the log
+Get-Content "C:\Program Files\metrics-collector\metrics-collector.log" -Wait -Tail 20
+```
+
+### Managing the Service
+
+```powershell
+nssm stop metrics-collector
+nssm restart metrics-collector
+nssm edit metrics-collector   # opens a GUI to change any setting above
+```
+
+Since it's registered as a real Windows service, the standard tools also work: `services.msc`, `Start-Service metrics-collector`, `Stop-Service metrics-collector`, `sc query metrics-collector`.
+
+### Alternative: Task Scheduler (no third-party tool)
+
+If you'd rather not install NSSM, Task Scheduler can run the binary at boot and restart it on failure, though it won't behave like a real service (no `services.msc` entry, no dependency ordering):
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "C:\Program Files\metrics-collector\metrics-collector.exe" `
+    -Argument '--mongodb "mongodb://YOUR_MONGODB_HOST:27017" --key "YOUR_NODE_KEY" --database "monitoring"'
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit (New-TimeSpan -Days 0)
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+
+Register-ScheduledTask -TaskName "metrics-collector" -Action $action -Trigger $trigger `
+    -Settings $settings -Principal $principal
+
+Start-ScheduledTask -TaskName "metrics-collector"
+```
+
+---
+
 ## Verification
 
 ### 1. Check Service Status
@@ -433,6 +538,12 @@ sudo journalctl -u metrics-collector -f
 ```bash
 sudo launchctl print system/com.metrics-collector | head -20
 tail -f /var/log/metrics-collector.log
+```
+
+**Windows:**
+```powershell
+Get-Service metrics-collector
+Get-Content "C:\Program Files\metrics-collector\metrics-collector.log" -Wait -Tail 20
 ```
 
 ### 2. Verify Data in MongoDB
@@ -606,6 +717,25 @@ sudo dscl . -delete /Users/_metricscollector
 # mongosh "mongodb://your-mongodb-host:27017"
 # use monitoring
 # db.dropDatabase()
+```
+
+**Windows (NSSM):**
+```powershell
+nssm stop metrics-collector
+nssm remove metrics-collector confirm
+Remove-Item -Recurse -Force "C:\Program Files\metrics-collector"
+
+# Remove MongoDB data (optional)
+# mongosh "mongodb://your-mongodb-host:27017"
+# use monitoring
+# db.dropDatabase()
+```
+
+**Windows (Task Scheduler alternative):**
+```powershell
+Stop-ScheduledTask -TaskName "metrics-collector"
+Unregister-ScheduledTask -TaskName "metrics-collector" -Confirm:$false
+Remove-Item -Recurse -Force "C:\Program Files\metrics-collector"
 ```
 
 ---
