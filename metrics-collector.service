@@ -28,8 +28,8 @@ WorkingDirectory=/opt/metrics-collector
 # --database: Database name (optional, defaults to "monitoring")
 # --create-indexes: Create database indexes on startup (optional, recommended for first run)
 ExecStart=/opt/metrics-collector/metrics-collector \
-    --mongodb "mongodb://localhost:27017" \
-    --key "1111-1111" \
+    --mongodb "mongodb://localhost:27017/monitoring?authSource=admin" \
+    --key "0001-0001" \
     --database "monitoring"
 
 # Restart policy
