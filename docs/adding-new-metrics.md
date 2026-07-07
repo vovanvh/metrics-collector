@@ -16,13 +16,14 @@ This guide provides detailed instructions for extending the Metrics Collector wi
 
 ## Quick Overview
 
-Adding a new metric involves **5 code changes** and **no MongoDB config changes**:
+Adding a new metric involves **5 code changes** (6 if it's a log/event-style metric) and **no MongoDB config changes**:
 
 1. **Create** a new Rust file in `src/metrics/`
 2. **Implement** the `MetricCollector` trait
 3. **Register** the collector in `create_all_collectors()` (`src/metrics/mod.rs`)
 4. **Register** the collection name in `collection_for()` (`src/scheduler.rs`)
-5. **Build** and deploy the updated binary
+5. **(Log/event metrics only)** Register it in `is_log_metric()` (`src/scheduler.rs`) so every tick is written instead of just the last one before each flush
+6. **Build** and deploy the updated binary
 
 The collection timing (how often to collect, how often to flush) comes from the shared `MonitoringSettings` document — no per-metric config is needed.
 
@@ -50,9 +51,27 @@ When your `collect()` returns a document with **top-level numeric fields** (Doub
 
 ### Nested-array metrics (e.g. DiskSpace, DockerStats)
 
-If your `collect()` document has **nested arrays** (like `disks: [...]` or `containers: [...]`) and no top-level numeric fields, the aggregator finds nothing to aggregate. It will instead return the **last raw sample** of the window with an updated timestamp.
+If your `collect()` document has **nested arrays** (like `disks: [...]` or `containers: [...]`) and no top-level numeric fields, and it's routed through `run_standard_task`, the aggregator finds nothing to aggregate. It will instead return the **last raw sample** of the window with an updated timestamp — everything collected in between is discarded.
 
 For arrays where you want per-item aggregation (like Docker containers), you need a custom buffer — see `DockerMetricBuffer` in `src/aggregator.rs` as a reference.
+
+### Log/event metrics (e.g. ProcessCPUSnapshot, DockerEvents, SystemEvents)
+
+If your metric is inherently an event/snapshot list rather than a numeric measurement — and you'd lose meaningful data if only the last tick before each flush were kept — register it as a **log metric** instead of letting it fall through to `run_standard_task`. Add its name to `is_log_metric()` in `src/scheduler.rs`:
+
+```rust
+fn is_log_metric(metric_name: &str) -> bool {
+    matches!(
+        metric_name,
+        "ProcessCPUSnapshot" | "ProcessRAMSnapshot" | "DockerEvents" | "DockerLogs" | "SystemEvents"
+            | "MyNewLogMetric"  // ← add yours here
+    )
+}
+```
+
+This routes your collector through `run_log_task`, which writes **every** collected document immediately — no buffering, no aggregation, no discarded ticks. Use this when the value is in the individual events themselves, not a statistical summary of them.
+
+If your metric also talks to the Docker daemon (like `DockerEvents`/`DockerLogs`), also add it to the `collect_timeout_for()` match so it shares `collect_docker_timeout` instead of the default `collect_timeout`.
 
 ### Collection timing
 
@@ -503,6 +522,7 @@ Before deploying a new metric:
 - [ ] Module declared with `pub mod ...` in `metrics/mod.rs`
 - [ ] Collection name added to `collection_for()` (`scheduler.rs`)
 - [ ] Constant fields (if any) added to `PASSTHROUGH_FIELDS` (`aggregator.rs`)
+- [ ] If log/event-style (no top-level numeric fields worth averaging): added to `is_log_metric()` (`scheduler.rs`)
 - [ ] Dependencies added to `Cargo.toml` (if needed)
 - [ ] Unit tests written and passing (`cargo test`)
 - [ ] Binary built and tested locally

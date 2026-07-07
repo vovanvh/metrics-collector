@@ -30,7 +30,8 @@ The Metrics Collector is a lightweight, extensible server monitoring tool that:
 ### Key Features
 
 - **Async/Concurrent**: Uses Tokio for efficient concurrent metric collection
-- **Aggregated Storage**: Buffers 60-second windows; stores avg/min/max instead of raw samples
+- **Aggregated Storage**: Buffers 60-second windows; stores avg/min/max instead of raw samples (metrics only)
+- **Unaggregated Log/Event Storage**: Process, Docker event/log, and system event collectors write every tick as its own document — no numeric fields to average
 - **Extensible**: Easy to add new metric types via trait system
 - **Configurable**: MongoDB-based configuration with live reload after every flush
 - **Reliable**: Automatic restart, graceful error handling
@@ -73,6 +74,8 @@ The Metrics Collector is a lightweight, extensible server monitoring tool that:
                    └────────────────┘
 ```
 
+> This diagram shows the 4 aggregated metric collectors. The 5 log/event collectors (`ProcessCPUSnapshot`, `ProcessRAMSnapshot`, `DockerEvents`, `DockerLogs`, `SystemEvents`) follow the same collect → store → reload-settings shape, but skip the buffer box entirely — each tick is written straight to MongoDB via `run_log_task` (see [Scheduler Module](#scheduler-module-schedulerrs)).
+
 ---
 
 ## Project Structure
@@ -94,7 +97,12 @@ metrics-collector/
 │       ├── load_average.rs     # Load average metric
 │       ├── memory.rs           # Memory usage metric
 │       ├── disk.rs             # Disk space metric
-│       └── docker.rs           # Docker stats metric
+│       ├── docker.rs           # Docker stats metric
+│       ├── processes_cpu.rs    # Top host processes by CPU (log, unaggregated)
+│       ├── processes_ram.rs    # Top host processes by RAM (log, unaggregated)
+│       ├── docker_events.rs    # Docker lifecycle events (log, unaggregated)
+│       ├── docker_logs.rs      # Docker container stdout/stderr (log, unaggregated)
+│       └── system_events.rs    # Kernel/systemd error events (log, unaggregated)
 │
 └── docs/
     ├── deployment.md           # Deployment guide
@@ -112,7 +120,7 @@ metrics-collector/
 | `config.rs` | MongoDB connection, settings load/reload | `ConfigManager`, `MonitoringSettings` |
 | `storage.rs` | Metric persistence to MongoDB | `MetricStorage`, `store_metric_safe()` |
 | `aggregator.rs` | In-memory buffering, avg/min/max computation | `MetricBuffer`, `DockerMetricBuffer` |
-| `scheduler.rs` | Dual-timer task scheduling with Tokio | `MetricScheduler`, `run_standard_task()`, `run_docker_task()` |
+| `scheduler.rs` | Task scheduling with Tokio, collection routing | `MetricScheduler`, `run_standard_task()`, `run_docker_task()`, `run_log_task()`, `collection_for()`, `collect_timeout_for()` |
 | `metrics/mod.rs` | Metric trait and collector factory | `MetricCollector` trait, `create_all_collectors()` |
 | `metrics/*.rs` | Individual metric implementations | Collector structs implementing `MetricCollector` |
 
@@ -318,12 +326,19 @@ Aggregates per container across samples:
 
 Collection names are hardcoded in `scheduler.rs` via `collection_for()`:
 
-| Metric | Collection |
-|--------|-----------|
-| LoadAverage | `load_average_metrics` |
-| Memory | `memory_metrics` |
-| DiskSpace | `disk_metrics` |
-| DockerStats | `docker_metrics` |
+| Metric | Collection | Written by |
+|--------|-----------|-----------|
+| LoadAverage | `load_average_metrics` | `run_standard_task` (aggregated) |
+| Memory | `memory_metrics` | `run_standard_task` (aggregated) |
+| DiskSpace | `disk_metrics` | `run_standard_task` (last-sample fallback) |
+| DockerStats | `docker_metrics` | `run_docker_task` (aggregated) |
+| ProcessCPUSnapshot | `process_cpu_logs` | `run_log_task` (every tick) |
+| ProcessRAMSnapshot | `process_ram_logs` | `run_log_task` (every tick) |
+| DockerEvents | `docker_event_logs` | `run_log_task` (every tick) |
+| DockerLogs | `docker_container_logs` | `run_log_task` (every tick) |
+| SystemEvents | `system_event_logs` | `run_log_task` (every tick) |
+
+Anything not in this list falls through to `unknown_metrics` — this should never happen for a registered collector; if it does, `collection_for()` is missing an arm for it.
 
 ---
 
@@ -342,15 +357,29 @@ pub struct MetricScheduler {
 }
 ```
 
-Two task variants:
-- `run_standard_task` — LoadAverage, Memory, DiskSpace: uses `MetricBuffer`, `collect_timeout`
-- `run_docker_task` — DockerStats: uses `DockerMetricBuffer`, `collect_docker_timeout`
+Three task variants, dispatched in `start()` based on the collector's name:
+- `run_standard_task` — LoadAverage, Memory, DiskSpace: uses `MetricBuffer`, buffers and flushes every `store_timeout`
+- `run_docker_task` — DockerStats: uses `DockerMetricBuffer`, buffers and flushes every `store_timeout`
+- `run_log_task` — ProcessCPUSnapshot, ProcessRAMSnapshot, DockerEvents, DockerLogs, SystemEvents (selected via `is_log_metric()`): **no buffering** — each collected document is written to MongoDB immediately
 
-Both variants follow the same outer loop:
+`run_standard_task` and `run_docker_task` follow the same outer loop:
 1. Create `collect_timer` and `flush_sleep` from current settings
 2. Inner `select!` loop: collect until flush deadline
 3. Flush buffer → store to MongoDB → reload settings
 4. Repeat with updated settings
+
+`run_log_task` follows a similar outer loop, but there's no buffer to flush — instead of accumulating samples, `storage.store_metric_safe()` is called directly inside the `select!` arm on every `collect_timer` tick. Settings are still reloaded on the same `store_timeout` cadence via a parallel `reload_sleep` timer, so `collect_timeout` changes take effect without a restart, same as the other task types.
+
+**Which timeout applies to which collector** is resolved by `collect_timeout_for()`, the single source of truth used by both the startup log line and `run_log_task`:
+```rust
+fn collect_timeout_for(metric_name: &str, settings: &MonitoringSettings) -> u64 {
+    match metric_name {
+        "DockerStats" | "DockerEvents" | "DockerLogs" => settings.collect_docker_timeout,
+        _ => settings.collect_timeout,
+    }
+}
+```
+Anything that talks to the Docker daemon (`DockerStats`, `DockerEvents`, `DockerLogs`) shares `collect_docker_timeout` so they don't hit it at inconsistent rates; everything else uses `collect_timeout`.
 
 ---
 
@@ -444,6 +473,66 @@ Disk documents contain a nested `disks` array. The aggregator finds no top-level
 
 ---
 
+### Log/Event Collectors
+
+Unlike the four metrics above, these five collectors produce documents with no top-level numeric fields — just `node`, `timestamp`, and a nested array. Run via `run_log_task` (see [Scheduler Module](#scheduler-module-schedulerrs)): every tick is written as its own document, not aggregated.
+
+#### Process CPU / RAM Snapshots (`processes_cpu.rs`, `processes_ram.rs`)
+
+**Data Source:** `sysinfo` process list. Filtered to drop noise: `ProcessCPUSnapshot` keeps processes above 1% CPU, `ProcessRAMSnapshot` keeps processes above 1% of total system RAM. Top 10 each.
+
+```json
+{
+  "node": "0001-0001", "timestamp": "...",
+  "processes": [
+    { "pid": 4821, "name": "java", "cpu_percent": 187.3, "memory_mb": 2048.5, "memory_percent": 8.5, "status": "Run" }
+  ]
+}
+```
+
+#### Docker Events (`docker_events.rs`)
+
+**Data Source:** Docker Engine events API. Container lifecycle transitions (start, stop, die, OOM-kill, restart).
+
+```json
+{
+  "node": "0001-0001", "timestamp": "...",
+  "events": [
+    { "event_time": "...", "container_id": "531c5b818fe7", "container_name": "my-app", "action": "die", "exit_code": 137 }
+  ]
+}
+```
+
+#### Docker Container Logs (`docker_logs.rs`)
+
+**Data Source:** Docker Engine logs API. stdout/stderr lines batched per container per tick.
+
+```json
+{
+  "node": "0001-0001", "timestamp": "...",
+  "containers": [
+    { "container_id": "531c5b818fe7", "container_name": "my-app",
+      "log_lines": [ { "stream": "stderr", "time": "...", "message": "OutOfMemoryError: Java heap space" } ],
+      "truncated": false }
+  ]
+}
+```
+
+#### System Events (`system_events.rs`)
+
+**Data Source:** `journalctl --output=json -p err` (Linux/systemd only). Kernel and systemd error-level events since the last poll. Returns an empty `events` array on non-Linux platforms or if `journalctl` is unavailable, rather than failing.
+
+```json
+{
+  "node": "0001-0001", "timestamp": "...",
+  "events": [
+    { "event_time": "...", "priority": "err", "unit": "docker.service", "message": "...", "hostname": "node-01" }
+  ]
+}
+```
+
+---
+
 ## Data Flow
 
 ### Application Startup Flow
@@ -464,6 +553,8 @@ Disk documents contain a nested `disks` array. The aggregator finds no top-level
 
 ### Metric Collection Flow (Per Metric Task)
 
+**`run_standard_task` / `run_docker_task`** (LoadAverage, Memory, DiskSpace, DockerStats):
+
 ```
 Outer loop (runs forever, settings may change each iteration):
    │
@@ -478,6 +569,23 @@ Outer loop (runs forever, settings may change each iteration):
    ├─> buffer.flush() → aggregated BSON document
    ├─> storage.store_metric_safe(collection, document)
    ├─> config_manager.reload_settings()  [re-read MongoDB after each store]
+   └─> update settings locals, loop back
+```
+
+**`run_log_task`** (ProcessCPUSnapshot, ProcessRAMSnapshot, DockerEvents, DockerLogs, SystemEvents) — no buffer, writes every tick:
+
+```
+Outer loop (runs forever, settings may change each iteration):
+   │
+   ├─> Create collect_timer(collect_timeout_for(...)) and reload_sleep(store_timeout)
+   │
+   │   Inner select! loop:
+   │   ├─> collect_timer.tick() → collector.collect() → storage.store_metric_safe() [immediately]
+   │   ├─> collect_timer.tick() → collector.collect() → storage.store_metric_safe() [immediately]
+   │   ├─> ... (repeats until reload_sleep fires)
+   │   └─> reload_sleep fires → break inner loop
+   │
+   ├─> config_manager.reload_settings()  [re-read MongoDB on the same cadence as a flush]
    └─> update settings locals, loop back
 ```
 
@@ -581,9 +689,9 @@ Raw samples accumulate in memory; only the aggregated summary is written to Mong
 
 ### Write Volume
 
-Before aggregation: 1 insert per metric per `collect_timeout` seconds = ~720 inserts/hour for load average alone.
+**Aggregated metrics** (LoadAverage, Memory, DiskSpace, DockerStats): before aggregation, 1 insert per metric per `collect_timeout` seconds = ~720 inserts/hour for load average alone. After aggregation: 1 insert per metric per `store_timeout` seconds = 60 inserts/hour for all four metrics combined.
 
-After aggregation: 1 insert per metric per `store_timeout` seconds = 60 inserts/hour for all four metrics combined.
+**Log/event collectors** (ProcessCPUSnapshot, ProcessRAMSnapshot, DockerEvents, DockerLogs, SystemEvents): **not aggregated** — each writes 1 document per `collect_timeout_for()` tick. With the defaults (5s for host-level, 20s for Docker-facing), that's ~720 inserts/hour each for the three host/system collectors and ~180 inserts/hour each for the two Docker-facing ones — roughly 2,700 inserts/hour combined. This is why these collections need a short TTL (tracked in MC-6) rather than the 30-day retention used for metrics.
 
 ### CPU Usage
 
@@ -629,7 +737,8 @@ See `docs/adding-new-metrics.md` for a complete guide.
 3. Add to `create_all_collectors()` in `src/metrics/mod.rs`
 4. Add collection name mapping in `collection_for()` in `src/scheduler.rs`
 5. If the metric has constant fields, add them to `PASSTHROUGH_FIELDS` in `src/aggregator.rs`
-6. Build and deploy
+6. If the document has no top-level numeric fields (an events/log-style collector), add its name to `is_log_metric()` in `src/scheduler.rs` so `run_log_task` writes every tick instead of `run_standard_task` silently keeping only the last tick before each flush
+7. Build and deploy
 
 No MongoDB configuration changes needed — collection name and timing are resolved from the three shared timeout settings.
 

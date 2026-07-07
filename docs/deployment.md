@@ -8,10 +8,11 @@ This guide provides detailed instructions for deploying the Metrics Collector on
 2. [Building the Application](#building-the-application)
 3. [MongoDB Setup](#mongodb-setup)
 4. [Installation](#installation)
-5. [SystemD Service Setup](#systemd-service-setup)
-6. [Verification](#verification)
-7. [Troubleshooting](#troubleshooting)
-8. [Uninstallation](#uninstallation)
+5. [SystemD Service Setup (Linux)](#systemd-service-setup)
+6. [launchd Service Setup (macOS)](#launchd-service-setup-macos)
+7. [Verification](#verification)
+8. [Troubleshooting](#troubleshooting)
+9. [Uninstallation](#uninstallation)
 
 ---
 
@@ -19,11 +20,11 @@ This guide provides detailed instructions for deploying the Metrics Collector on
 
 ### Required Software
 
-- **Operating System**: Linux (Ubuntu 20.04+, CentOS 8+, or similar)
+- **Operating System**: Linux (Ubuntu 20.04+, CentOS 8+, or similar) or macOS (12+)
 - **Rust**: Version 1.70 or higher (for building)
 - **MongoDB**: Version 4.4 or higher (accessible from your server)
 - **Docker** (optional): If you want to monitor Docker containers
-- **SystemD**: For service management (standard on modern Linux)
+- **Service manager**: SystemD on Linux (standard on modern distros), launchd on macOS (built in)
 
 ### Required Permissions
 
@@ -99,10 +100,19 @@ use monitoring
 // Collections are created automatically by the application
 // You can create them manually if preferred:
 db.createCollection("MonitoringSettings")
+
+// Aggregated metrics (avg/min/max per store_timeout window)
 db.createCollection("load_average_metrics")
 db.createCollection("memory_metrics")
 db.createCollection("disk_metrics")
 db.createCollection("docker_metrics")
+
+// Unaggregated log/event snapshots (one document per collect_timeout tick)
+db.createCollection("process_cpu_logs")
+db.createCollection("process_ram_logs")
+db.createCollection("docker_event_logs")
+db.createCollection("docker_container_logs")
+db.createCollection("system_event_logs")
 ```
 
 ### 2. Create Configuration Document
@@ -137,32 +147,37 @@ db.MonitoringSettings.findOne({ "key": "0001-0001" })
 ### 3. Create Indexes (Recommended for Production)
 
 ```javascript
-// Create compound indexes for efficient time-series queries
+// Create compound indexes for efficient time-series queries — metrics
 db.load_average_metrics.createIndex({ "node": 1, "timestamp": -1 })
 db.memory_metrics.createIndex({ "node": 1, "timestamp": -1 })
 db.disk_metrics.createIndex({ "node": 1, "timestamp": -1 })
 db.docker_metrics.createIndex({ "node": 1, "timestamp": -1 })
 
-// Optional: TTL index to auto-delete old data (e.g., after 30 days)
-db.load_average_metrics.createIndex(
-  { "timestamp": 1 },
-  { expireAfterSeconds: 2592000 }
-)
-db.memory_metrics.createIndex(
-  { "timestamp": 1 },
-  { expireAfterSeconds: 2592000 }
-)
-db.disk_metrics.createIndex(
-  { "timestamp": 1 },
-  { expireAfterSeconds: 2592000 }
-)
-db.docker_metrics.createIndex(
-  { "timestamp": 1 },
-  { expireAfterSeconds: 2592000 }
-)
+// ...and for the log/event collections
+db.process_cpu_logs.createIndex({ "node": 1, "timestamp": -1 })
+db.process_ram_logs.createIndex({ "node": 1, "timestamp": -1 })
+db.docker_event_logs.createIndex({ "node": 1, "timestamp": -1 })
+db.docker_container_logs.createIndex({ "node": 1, "timestamp": -1 })
+db.system_event_logs.createIndex({ "node": 1, "timestamp": -1 })
+
+// Optional: TTL index to auto-delete old data (e.g., after 30 days for metrics)
+db.load_average_metrics.createIndex({ "timestamp": 1 }, { expireAfterSeconds: 2592000 })
+db.memory_metrics.createIndex({ "timestamp": 1 }, { expireAfterSeconds: 2592000 })
+db.disk_metrics.createIndex({ "timestamp": 1 }, { expireAfterSeconds: 2592000 })
+db.docker_metrics.createIndex({ "timestamp": 1 }, { expireAfterSeconds: 2592000 })
+
+// Log/event collections are only useful for root-cause analysis right after
+// an anomaly fires — a much shorter TTL (e.g. 1 hour) is appropriate
+db.process_cpu_logs.createIndex({ "timestamp": 1 }, { expireAfterSeconds: 3600 })
+db.process_ram_logs.createIndex({ "timestamp": 1 }, { expireAfterSeconds: 3600 })
+db.docker_event_logs.createIndex({ "timestamp": 1 }, { expireAfterSeconds: 3600 })
+db.docker_container_logs.createIndex({ "timestamp": 1 }, { expireAfterSeconds: 3600 })
+db.system_event_logs.createIndex({ "timestamp": 1 }, { expireAfterSeconds: 3600 })
 ```
 
-Alternatively, run the application with `--create-indexes` on first start and it will create the compound `(node, timestamp)` indexes automatically.
+> These TTL indexes are set up manually for now — `metrics-collector` doesn't create them itself yet (tracked as MC-6).
+
+Alternatively, run the application with `--create-indexes` on first start and it will create the compound `(node, timestamp)` indexes automatically for all 9 collections (metrics and logs) — but not the TTL ones above, those must be created manually.
 
 ---
 
@@ -254,13 +269,170 @@ Expected output:
 
 ---
 
+## launchd Service Setup (macOS)
+
+macOS doesn't use systemd — the equivalent is **launchd**. To run the collector as a background service that starts automatically on boot (even before anyone logs in) and restarts if it crashes, install it as a **LaunchDaemon**.
+
+> If you'd rather have it start only when a specific user logs in (not on boot), install the same plist under `~/Library/LaunchAgents/` instead of `/Library/LaunchDaemons/` and drop the `UserName`/`GroupName` keys — see the note at the end of this section.
+
+### 1. Build the Binary
+
+If you're building directly on the Mac:
+
+```bash
+cd /path/to/metrics-collector
+cargo build --release
+# Binary at: target/release/metrics-collector
+```
+
+### 2. Create a Dedicated User (optional, recommended)
+
+```bash
+# macOS system users need a free UID in the system range (typically < 500)
+sudo dscl . -create /Users/_metricscollector
+sudo dscl . -create /Users/_metricscollector UserShell /usr/bin/false
+sudo dscl . -create /Users/_metricscollector RealName "Metrics Collector"
+sudo dscl . -create /Users/_metricscollector UniqueID 399
+sudo dscl . -create /Users/_metricscollector PrimaryGroupID 20
+sudo dscl . -create /Users/_metricscollector NFSHomeDirectory /var/empty
+```
+
+(Skip this and drop the `UserName`/`GroupName` keys from the plist below to run as root instead — simpler, but less isolated.)
+
+### 3. Install the Binary
+
+```bash
+sudo mkdir -p /usr/local/opt/metrics-collector
+sudo cp target/release/metrics-collector /usr/local/opt/metrics-collector/
+sudo chown -R _metricscollector:staff /usr/local/opt/metrics-collector
+sudo chmod 755 /usr/local/opt/metrics-collector/metrics-collector
+```
+
+### 4. Create the launchd Plist
+
+Create `/Library/LaunchDaemons/com.metrics-collector.plist`:
+
+```bash
+sudo nano /Library/LaunchDaemons/com.metrics-collector.plist
+```
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.metrics-collector</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/opt/metrics-collector/metrics-collector</string>
+        <string>--mongodb</string>
+        <string>mongodb://YOUR_MONGODB_HOST:27017</string>
+        <string>--key</string>
+        <string>YOUR_NODE_KEY</string>
+        <string>--database</string>
+        <string>monitoring</string>
+    </array>
+
+    <!-- Start on boot -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart automatically if it crashes or is killed -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Run as the dedicated non-root user (remove these two keys to run as root) -->
+    <key>UserName</key>
+    <string>_metricscollector</string>
+    <key>GroupName</key>
+    <string>staff</string>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/metrics-collector.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/metrics-collector.error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>
+```
+
+For MongoDB with authentication, add the credentials into the `--mongodb` argument string as usual:
+`mongodb://username:password@host:27017/monitoring?authSource=admin`
+
+### 5. Set Permissions and Load the Service
+
+```bash
+sudo chown root:wheel /Library/LaunchDaemons/com.metrics-collector.plist
+sudo chmod 644 /Library/LaunchDaemons/com.metrics-collector.plist
+
+# Pre-create log files owned by the service user (launchd won't chown them for you)
+sudo touch /var/log/metrics-collector.log /var/log/metrics-collector.error.log
+sudo chown _metricscollector:staff /var/log/metrics-collector.log /var/log/metrics-collector.error.log
+
+# Modern macOS (12+): bootstrap into the system domain and enable
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.metrics-collector.plist
+sudo launchctl enable system/com.metrics-collector
+
+# Older macOS, if bootstrap isn't available:
+# sudo launchctl load -w /Library/LaunchDaemons/com.metrics-collector.plist
+```
+
+### 6. Verify It's Running
+
+```bash
+sudo launchctl print system/com.metrics-collector | head -20
+tail -f /var/log/metrics-collector.log
+```
+
+You should see `state = running` and a PID in the `print` output.
+
+### Managing the Service
+
+```bash
+# Stop (without disabling boot start)
+sudo launchctl kickstart -k system/com.metrics-collector   # restart
+sudo launchctl bootout system/com.metrics-collector          # stop + unload
+
+# Reload after editing the plist
+sudo launchctl bootout system/com.metrics-collector
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.metrics-collector.plist
+```
+
+### Running Per-User Instead of at Boot
+
+To start only when a specific user logs in rather than at system boot:
+
+1. Save the plist to `~/Library/LaunchAgents/com.metrics-collector.plist` instead.
+2. Remove the `UserName` and `GroupName` keys (the agent already runs as the logged-in user).
+3. Load it without `sudo` and in the `gui/<uid>` domain:
+   ```bash
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.metrics-collector.plist
+   ```
+
+---
+
 ## Verification
 
 ### 1. Check Service Status
 
+**Linux:**
 ```bash
 sudo systemctl status metrics-collector
 sudo journalctl -u metrics-collector -f
+```
+
+**macOS:**
+```bash
+sudo launchctl print system/com.metrics-collector | head -20
+tail -f /var/log/metrics-collector.log
 ```
 
 ### 2. Verify Data in MongoDB
@@ -287,6 +459,14 @@ db.docker_metrics.find({ "node": "0001-0001" }).sort({ timestamp: -1 }).limit(2)
 
 // Confirm each collection grows by exactly 1 document per store_timeout seconds
 db.load_average_metrics.countDocuments({ "node": "0001-0001" })
+
+// Log/event collections — one document per collect_timeout (or collect_docker_timeout
+// for the two Docker-facing ones) tick, not per store_timeout window
+db.process_cpu_logs.find({ "node": "0001-0001" }).sort({ timestamp: -1 }).limit(2)
+db.process_ram_logs.find({ "node": "0001-0001" }).sort({ timestamp: -1 }).limit(2)
+db.docker_event_logs.find({ "node": "0001-0001" }).sort({ timestamp: -1 }).limit(2)
+db.docker_container_logs.find({ "node": "0001-0001" }).sort({ timestamp: -1 }).limit(2)
+db.system_event_logs.find({ "node": "0001-0001" }).sort({ timestamp: -1 }).limit(2)
 ```
 
 ### 3. Test Settings Reload
@@ -399,6 +579,7 @@ Then restart the service.
 
 ## Uninstallation
 
+**Linux:**
 ```bash
 sudo systemctl stop metrics-collector
 sudo systemctl disable metrics-collector
@@ -406,6 +587,20 @@ sudo rm /etc/systemd/system/metrics-collector.service
 sudo systemctl daemon-reload
 sudo rm -rf /opt/metrics-collector
 sudo userdel -r metrics-collector
+
+# Remove MongoDB data (optional)
+# mongosh "mongodb://your-mongodb-host:27017"
+# use monitoring
+# db.dropDatabase()
+```
+
+**macOS:**
+```bash
+sudo launchctl bootout system/com.metrics-collector
+sudo rm /Library/LaunchDaemons/com.metrics-collector.plist
+sudo rm -rf /usr/local/opt/metrics-collector
+sudo rm /var/log/metrics-collector.log /var/log/metrics-collector.error.log
+sudo dscl . -delete /Users/_metricscollector
 
 # Remove MongoDB data (optional)
 # mongosh "mongodb://your-mongodb-host:27017"
