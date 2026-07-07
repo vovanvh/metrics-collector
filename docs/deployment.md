@@ -8,7 +8,7 @@ This guide provides detailed instructions for deploying the Metrics Collector on
 2. [Building the Application](#building-the-application)
 3. [MongoDB Setup](#mongodb-setup)
 4. [Installation](#installation)
-5. [SystemD Service Setup (Linux)](#systemd-service-setup)
+5. [SystemD Service Setup (Linux)](#systemd-service-setup-linux)
 6. [launchd Service Setup (macOS)](#launchd-service-setup-macos)
 7. [Verification](#verification)
 8. [Troubleshooting](#troubleshooting)
@@ -216,7 +216,7 @@ sudo -u metrics-collector /opt/metrics-collector/metrics-collector \
 
 ---
 
-## SystemD Service Setup
+## SystemD Service Setup (Linux)
 
 ### 1. Copy Service File
 
