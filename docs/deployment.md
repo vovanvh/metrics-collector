@@ -192,6 +192,10 @@ sudo useradd -r -s /bin/false -m metrics-collector
 
 # Optional: Add user to docker group (if monitoring Docker)
 sudo usermod -aG docker metrics-collector
+
+# Required for SystemEvents collector to read the journal — without this,
+# journalctl returns permission denied and system_event_logs stays empty
+sudo usermod -aG systemd-journal metrics-collector
 ```
 
 ### 2. Create Installation Directory
@@ -638,6 +642,18 @@ ls -l /var/run/docker.sock
 sudo usermod -aG docker metrics-collector
 sudo systemctl restart metrics-collector
 sudo -u metrics-collector docker ps
+```
+
+### `system_event_logs` Always Empty / "journalctl exited with status exit status: 1"
+
+The `metrics-collector` user isn't in the `systemd-journal` group, so `journalctl` refuses to return any events (this is handled gracefully — an empty `events` array is stored, not a crash — but you get no data).
+
+```bash
+sudo usermod -aG systemd-journal metrics-collector
+sudo systemctl restart metrics-collector
+
+# Confirm the warning stops appearing
+sudo journalctl -u metrics-collector -f | grep -i "journalctl exited"
 ```
 
 ### No Data Appearing in MongoDB
